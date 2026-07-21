@@ -1,0 +1,25 @@
+# Build output
+build/
+cmake-build-*/
+dist/
+wheelhouse/
+_skbuild/
+*.egg-info/
+
+# Native artifacts
+*.so
+*.dylib
+*.dll
+*.o
+*.a
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store

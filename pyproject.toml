@@ -1,0 +1,48 @@
+[build-system]
+requires = ["scikit-build-core>=0.8"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "vardoger"
+version = "0.1.0"
+description = "Drive the vardoger faithful-Android ARM64 runtime from Python."
+readme = "python/vardoger/README.md"
+requires-python = ">=3.10"
+keywords = ["android", "emulator", "unicorn", "reverse-engineering", "dex"]
+license = { text = "LGPL-3.0-only" }
+classifiers = [
+    "License :: OSI Approved :: GNU Lesser General Public License v3 (LGPLv3)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: C++",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+]
+
+[project.urls]
+Homepage = "https://github.com/OWNER/vardoger"
+Source = "https://github.com/OWNER/vardoger"
+
+# scikit-build-core drives the existing CMakeLists. The SKBUILD branch there installs
+# libvardoger_capi.so into the vardoger package, so the ctypes loader finds it beside __init__.py.
+[tool.scikit-build]
+minimum-version = "0.8"
+cmake.version = ">=3.24"
+wheel.packages = ["python/vardoger"]
+
+[tool.scikit-build.cmake.define]
+CMAKE_BUILD_TYPE = "Release"
+
+# Wheel building. The three native dependencies (unicorn, capstone, zlib) are not in the manylinux
+# base image, so before-all builds them from source; auditwheel/delocate then fold them into the
+# wheel so it is self-contained. Adjust the versions as needed.
+[tool.cibuildwheel]
+build = "cp310-* cp311-* cp312-*"
+skip = "*-musllinux*"
+build-verbosity = 1
+test-command = "python -c \"import vardoger; print(vardoger.VM)\""
+
+[tool.cibuildwheel.linux]
+before-all = "bash scripts/install_native_deps.sh"
+
+[tool.cibuildwheel.macos]
+before-all = "brew install unicorn capstone zlib"
