@@ -66,6 +66,9 @@ METHOD_CB = C.CFUNCTYPE(
 DEX_CB = C.CFUNCTYPE(
     None, C.POINTER(C.c_uint8), C.c_uint64, C.c_char_p, C.c_void_p
 )  # (data, n, src, user)
+STR_CB = C.CFUNCTYPE(
+    None, C.c_uint64, C.c_char_p, C.c_char_p, C.c_void_p
+)  # (addr, text, region, user)
 REGION_CB = C.CFUNCTYPE(
     None, C.c_uint64, C.c_uint64, C.c_uint32, C.c_char_p, C.c_void_p
 )  # (base, size, prot, label, user)
@@ -185,6 +188,9 @@ mv_gdb_attached = _sig("mv_gdb_attached", C.c_int, VMP)
 mv_gdb_detach = _sig("mv_gdb_detach", None, VMP)
 
 mv_scan_dex = _sig("mv_scan_dex", None, VMP, DEX_CB, C.c_void_p)
+mv_search_strings = _sig(
+    "mv_search_strings", None, VMP, C.c_char_p, C.c_int, STR_CB, C.c_void_p
+)
 mv_set_dex_observer = _sig("mv_set_dex_observer", None, VMP, DEX_CB, C.c_void_p)
 mv_registered_natives = _sig(
     "mv_registered_natives", None, VMP, NATIVE_CB, C.c_void_p

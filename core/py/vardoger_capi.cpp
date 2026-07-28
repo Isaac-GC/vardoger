@@ -51,6 +51,8 @@ typedef int64_t (*mv_method_cb)(uint64_t self, const int64_t* args, int nargs,
                                 void* user);
 typedef void (*mv_dex_cb)(const uint8_t* data, uint64_t n, const char* src,
                           void* user);
+typedef void (*mv_str_cb)(uint64_t addr, const char* text, const char* region,
+                          void* user);
 typedef void (*mv_region_cb)(uint64_t base, uint64_t size, uint32_t prot,
                              const char* label, void* user);
 typedef void (*mv_native_cb)(const char* cls, const char* name, const char* sig,
@@ -554,6 +556,16 @@ void mv_scan_dex(VM* vm, mv_dex_cb cb, void* user) {
   Extractor ex(vm->e, vm->mem);
   for (const auto& d : ex.scan_dex())
     cb(d.bytes.data(), d.bytes.size(), "memscan", user);
+}
+// Search guest memory for printable strings, keeping each match's address +
+// region. `needle` filters to runs containing it (empty = every run); `min_len`
+// is the shortest run to report (<=0 -> 4). Fires cb(addr, text, region) per hit.
+void mv_search_strings(VM* vm, const char* needle, int min_len, mv_str_cb cb,
+                       void* user) {
+  Extractor ex(vm->e, vm->mem);
+  const size_t ml = min_len > 0 ? static_cast<size_t>(min_len) : 4;
+  for (const auto& s : ex.search_strings(needle ? needle : "", ml))
+    cb(s.addr, s.text.c_str(), s.region.c_str(), user);
 }
 void mv_set_dex_observer(VM* vm, mv_dex_cb cb, void* user) {
   vm->jrt.set_bytes_observer(

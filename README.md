@@ -99,6 +99,19 @@ vm.set_syscall_observer(lambda nr, name, args, ret: print(f"svc {name}({args[0]:
 argument registers, and the return value (ptrace anti-debug probes, `getrandom`, `mprotect` W^X
 flips, `openat` of `/proc`, …).
 
+### Searching memory for strings
+
+After a packer self-decrypts, grep the guest's heap/mmap/lib memory for a marker and jump straight
+to its address:
+
+```python
+for s in vm.search_strings(needle="http", min_len=6):
+    print(f"{s.addr:#x}  [{s.region}]  {s.text!r}")
+```
+
+Every printable-ASCII run of `min_len`+ bytes is returned with its guest address and region; an empty
+`needle` returns them all. See [examples/search_strings.py](python/vardoger/examples/search_strings.py).
+
 ### Install paths
 
 Each VM gets a realistic randomized install path, exactly as the Android `PackageManager` lays one

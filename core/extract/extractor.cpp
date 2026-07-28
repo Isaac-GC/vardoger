@@ -141,6 +141,37 @@ std::vector<std::string> Extractor::harvest_strings(size_t min_len) {
   return {uniq.begin(), uniq.end()};
 }
 
+std::vector<FoundString> Extractor::search_strings(const std::string& needle,
+                                                   size_t min_len) {
+  std::vector<FoundString> out;
+  for (const Memory::Region& r : mem_.regions()) {
+    if (!scannable(r.kind)) continue;
+    std::vector<uint8_t> buf(r.size);
+    e_.read(r.base, buf.data(), r.size);
+
+    size_t start = 0;      // offset where the current run began
+    std::string run;
+    auto flush = [&](size_t end_off) {
+      if (run.size() >= min_len &&
+          (needle.empty() || run.find(needle) != std::string::npos))
+        out.push_back({r.base + start, run, r.label});
+      run.clear();
+      (void)end_off;
+    };
+    for (size_t i = 0; i < buf.size(); ++i) {
+      const uint8_t c = buf[i];
+      if (c >= 0x20 && c <= 0x7e) {
+        if (run.empty()) start = i;
+        run.push_back(static_cast<char>(c));
+      } else {
+        flush(i);
+      }
+    }
+    flush(buf.size());
+  }
+  return out;
+}
+
 void Extractor::write_artifacts(const std::string& outdir,
                                 const std::vector<FoundDex>& dexes,
                                 const std::vector<std::string>& strings) const {

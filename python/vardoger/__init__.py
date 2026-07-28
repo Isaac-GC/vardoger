@@ -101,6 +101,13 @@ class Native:
     fn: int  # Guest address of the native impl.
 
 
+@dataclass(slots=True)
+class FoundString:
+    addr: int  # Guest address of the string's first byte.
+    text: str  # The printable-ASCII run.
+    region: str  # The mapping it lives in (heap/mmap/lib label).
+
+
 class VM:
     """A configured vardoger Android runtime you drive from Python."""
 
@@ -444,6 +451,33 @@ class VM:
             out.append(C.string_at(data, n))
 
         _n.mv_scan_dex(self._h, cb, None)
+        return out
+
+    def search_strings(
+        self, needle: str = "", min_len: int = 4
+    ) -> list[FoundString]:
+        """Search guest memory for printable strings, keeping each match's address + region.
+
+        Scans the heap/mmap/lib regions for printable-ASCII runs of at least `min_len` bytes. With
+        `needle`, only runs containing it (as a substring) are returned — grep decrypted memory for a
+        marker (class name, URL, license string) and jump straight to its address. Returns a list of
+        :class:`FoundString` (addr, text, region); not deduped, ordered by address within each region.
+        """
+        out: list[FoundString] = []
+
+        @_n.STR_CB
+        def cb(addr, text, region, _u):
+            out.append(
+                FoundString(
+                    int(addr),
+                    text.decode("latin1", "replace") if text else "",
+                    region.decode() if region else "",
+                )
+            )
+
+        _n.mv_search_strings(
+            self._h, needle.encode(), int(min_len), cb, None
+        )
         return out
 
     def set_dex_observer(self, fn: Callable[[bytes, str], None]) -> None:
