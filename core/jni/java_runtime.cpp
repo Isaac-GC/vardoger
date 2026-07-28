@@ -256,18 +256,30 @@ DvmValue JavaRuntime::call_method(uint64_t mid, uint64_t self,
   // Class-qualified dispatch first ("owner#name") so ambiguous names
   // (<init>/valueOf/append) route by declaring class; then fall back to by-name
   // (unique framework methods).
+  HostMethod* impl = nullptr;
   if (!owner.empty()) {
     auto qit = host_methods_.find(owner + "#" + name);
-    if (qit != host_methods_.end()) return qit->second(*this, self, args);
+    if (qit != host_methods_.end()) impl = &qit->second;
   }
-  auto it = host_methods_.find(name);
-  if (it == host_methods_.end()) {
+  if (!impl) {
+    auto it = host_methods_.find(name);
+    if (it != host_methods_.end()) impl = &it->second;
+  }
+
+  // Trace every call (handled or not) BEFORE dispatch, so an observer sees the
+  // whole native<->Java surface and can log the "no host impl" ones itself.
+  const std::string sig =
+      (mr && mr->kind == Record::Method) ? mr->sig : std::string{};
+  if (method_observer_)
+    method_observer_(owner, name, sig, args, impl != nullptr);
+
+  if (!impl) {
     std::fprintf(stderr, "[java] no host impl for method '%s%s%s' (mid=%llu)\n",
                  owner.c_str(), owner.empty() ? "" : "#", name.c_str(),
                  static_cast<unsigned long long>(mid));
     return DvmValue::V();
   }
-  return it->second(*this, self, args);
+  return (*impl)(*this, self, args);
 }
 
 std::string JavaRuntime::class_name(uint64_t h) const {

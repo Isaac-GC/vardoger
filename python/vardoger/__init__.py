@@ -544,3 +544,28 @@ class VM:
 
         self._keep.append(cb)
         _n.mv_set_syscall_observer(self._h, cb, None)
+
+    def set_method_observer(
+        self, fn: Callable[[str, str, str, list[int], bool], None]
+    ) -> None:
+        """Call `fn(owner, name, sig, args, handled)` on every Java method the guest calls via JNI.
+
+        A complete trace of the native<->Java surface, whether or not you registered a handler:
+        `handled` is True if a `register_method` impl ran, False if the call fell through (returned
+        void + logged). `args` are int64 (object handles for objects, else the raw value); use
+        `string_of` to read jstring handles. Pairs with `register_method` — observe to discover which
+        methods matter, then register the ones you want to implement.
+        """
+
+        @_n.METHOD_OBS_CB
+        def cb(owner, name, sig, args, nargs, handled, _u):
+            fn(
+                owner.decode() if owner else "",
+                name.decode() if name else "",
+                sig.decode() if sig else "",
+                [int(args[i]) for i in range(nargs)],
+                bool(handled),
+            )
+
+        self._keep.append(cb)
+        _n.mv_set_method_observer(self._h, cb, None)

@@ -81,6 +81,16 @@ PROP_CB = C.CFUNCTYPE(
 SYSCALL_CB = C.CFUNCTYPE(
     None, C.c_uint64, C.c_char_p, C.POINTER(C.c_uint64), C.c_uint64, C.c_void_p
 )  # (nr, name, args[6], ret, user)
+METHOD_OBS_CB = C.CFUNCTYPE(
+    None,
+    C.c_char_p,
+    C.c_char_p,
+    C.c_char_p,
+    C.POINTER(C.c_int64),
+    C.c_int,
+    C.c_int,
+    C.c_void_p,
+)  # (owner, name, sig, args, nargs, handled, user)
 
 VMP = C.c_void_p  # Opaque VM*.
 
@@ -200,4 +210,7 @@ mv_set_property_observer = _sig(
 )
 mv_set_syscall_observer = _sig(
     "mv_set_syscall_observer", None, VMP, SYSCALL_CB, C.c_void_p
+)
+mv_set_method_observer = _sig(
+    "mv_set_method_observer", None, VMP, METHOD_OBS_CB, C.c_void_p
 )

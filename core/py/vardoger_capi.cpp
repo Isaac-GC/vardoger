@@ -60,6 +60,9 @@ typedef void (*mv_native_cb)(const char* cls, const char* name, const char* sig,
 typedef void (*mv_prop_cb)(const char* name, const char* value, void* user);
 typedef void (*mv_syscall_cb)(uint64_t nr, const char* name,
                               const uint64_t* args, uint64_t ret, void* user);
+typedef void (*mv_method_obs_cb)(const char* owner, const char* name,
+                                 const char* sig, const int64_t* args,
+                                 int nargs, int handled, void* user);
 }
 
 // ---- the VM facade
@@ -595,6 +598,23 @@ void mv_set_syscall_observer(VM* vm, mv_syscall_cb cb, void* user) {
   vm->syscalls.set_syscall_observer(
       [cb, user](uint64_t nr, const char* name, const uint64_t args[6],
                  uint64_t ret) { cb(nr, name, args, ret, user); });
+}
+// Fire cb(owner, name, sig, args[nargs], handled) on EVERY Java method the guest
+// calls through JNI. `handled`=1 if a host impl ran (else the call returned void
+// and was logged). Each arg is an int64 (object handle for objects, else the raw
+// value). Shows the full native<->Java surface without pre-registering names.
+void mv_set_method_observer(VM* vm, mv_method_obs_cb cb, void* user) {
+  vm->jrt.set_method_observer(
+      [cb, user](const std::string& owner, const std::string& name,
+                 const std::string& sig, const std::vector<DvmValue>& a,
+                 bool handled) {
+        std::vector<int64_t> args;
+        args.reserve(a.size());
+        for (const auto& v : a)
+          args.push_back(v.kind == DvmValue::Object ? (int64_t)v.obj : v.i);
+        cb(owner.c_str(), name.c_str(), sig.c_str(), args.data(),
+           (int)args.size(), handled ? 1 : 0, user);
+      });
 }
 
 }  // extern "C"

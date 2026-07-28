@@ -99,6 +99,21 @@ vm.set_syscall_observer(lambda nr, name, args, ret: print(f"svc {name}({args[0]:
 argument registers, and the return value (ptrace anti-debug probes, `getrandom`, `mprotect` W^X
 flips, `openat` of `/proc`, …).
 
+### Tracing Java method calls
+
+See every Java method the native code invokes through JNI — a complete trace of the native↔Java
+surface, whether or not you've implemented the method:
+
+```python
+vm.set_method_observer(lambda owner, name, sig, args, handled:
+    print(f"{'handled' if handled else 'MISSING'}  {owner}#{name}{sig}  args={args}"))
+```
+
+`handled` is `False` when no host impl exists (the call returns void and is logged) — those are the
+methods worth implementing. Pair it with `register_method("name", fn)` (or `"Owner#name"` to
+disambiguate): observe to discover which methods a packer calls, then register handlers for the ones
+that matter. `args` are int64 (object handles for objects); read jstring handles with `string_of`.
+
 ### Searching memory for strings
 
 After a packer self-decrypts, grep the guest's heap/mmap/lib memory for a marker and jump straight

@@ -61,6 +61,13 @@ class JavaRuntime {
   // memory.
   using BytesObserver =
       std::function<void(const std::vector<uint8_t>&, const std::string& src)>;
+  // Notified on EVERY Java method the guest calls through JNI, whether or not a
+  // host impl handles it: (owner, name, sig, args, handled). A complete trace of
+  // the native<->Java surface a packer exercises, without pre-guessing names.
+  using MethodObserver =
+      std::function<void(const std::string& owner, const std::string& name,
+                         const std::string& sig,
+                         const std::vector<DvmValue>& args, bool handled)>;
 
   struct Native {
     std::string cls, name, sig;
@@ -125,6 +132,10 @@ class JavaRuntime {
   // --- method dispatch ---
   void register_method(const std::string& name,
                        HostMethod fn);  // keyed by method name
+  // Observe every call_method (handled or not). One observer.
+  void set_method_observer(MethodObserver o) {
+    method_observer_ = std::move(o);
+  }
   DvmValue call_method(uint64_t mid, uint64_t self,
                        const std::vector<DvmValue>& args);
 
@@ -193,6 +204,7 @@ class JavaRuntime {
       host_methods_;  // method name -> impl
   std::vector<Native> registered_;
   BytesObserver bytes_observer_;
+  MethodObserver method_observer_;
 };
 
 }  // namespace vardoger
