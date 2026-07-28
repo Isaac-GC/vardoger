@@ -43,6 +43,11 @@ test-command = "python -c \"import vardoger; print(vardoger.VM)\""
 
 [tool.cibuildwheel.linux]
 before-all = "bash scripts/install_native_deps.sh"
+# install_native_deps.sh builds Unicorn/Capstone into /usr/local, but manylinux's
+# pkg-config doesn't search there and env set inside before-all doesn't reach the
+# build step — so point pkg-config (CMake's pkg_check_modules) and the loader at it
+# here, where cibuildwheel applies it to every step.
+environment = { PKG_CONFIG_PATH = "/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig", LD_LIBRARY_PATH = "/usr/local/lib:/usr/local/lib64" }
 
 [tool.cibuildwheel.macos]
 before-all = "brew install unicorn capstone zlib"

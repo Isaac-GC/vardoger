@@ -1,15 +1,31 @@
 #include "vardoger/extract/extractor.hpp"
 
+#include <sys/stat.h>
+
 #include <cctype>
 #include <cstdio>
 #include <cstring>
-#include <filesystem>
 #include <fstream>
 #include <set>
 
 namespace vardoger {
 
 namespace {
+// Recursive mkdir (mkdir -p) via POSIX, avoiding <filesystem>, whose
+// create_directories/path are gated to macOS 10.15+ and would break wheels
+// built against an older -mmacosx-version-min (cibuildwheel's x86_64 default).
+void mkdir_p(const std::string& path) {
+  std::string cur;
+  for (size_t i = 0; i <= path.size(); ++i) {
+    if (i == path.size() || path[i] == '/') {
+      if (!cur.empty()) ::mkdir(cur.c_str(), 0755);  // ignore EEXIST/errors
+      if (i < path.size()) cur.push_back('/');
+    } else {
+      cur.push_back(path[i]);
+    }
+  }
+}
+
 uint32_t rd32(const uint8_t* p) {
   return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
          (static_cast<uint32_t>(p[2]) << 16) |
@@ -128,8 +144,7 @@ std::vector<std::string> Extractor::harvest_strings(size_t min_len) {
 void Extractor::write_artifacts(const std::string& outdir,
                                 const std::vector<FoundDex>& dexes,
                                 const std::vector<std::string>& strings) const {
-  namespace fs = std::filesystem;
-  fs::create_directories(outdir + "/dex");
+  mkdir_p(outdir + "/dex");
 
   std::ofstream manifest(outdir + "/manifest.txt");
   int n = 0;
