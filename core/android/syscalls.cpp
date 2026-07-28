@@ -218,16 +218,82 @@ Sys normalize(Abi abi, uint64_t nr) {
 }
 
 // Fill an arm64 struct stat (st_mode @16, st_size @48) for a served fd.
-void write_stat64(Engine& e, uint64_t st, size_t size) {
+void write_stat64(Engine& e, uint64_t st, size_t size, uint32_t mode = 0x81A4) {
   std::vector<uint8_t> zero(128, 0);
   e.write(st, zero.data(), zero.size());
-  e.write_t<uint32_t>(st + 16, 0x81A4);  // S_IFREG | 0644
-  e.write_t<uint64_t>(st + 48, size);    // st_size
+  e.write_t<uint32_t>(st + 16, mode);  // st_mode (0x81A4 = S_IFREG|0644)
+  e.write_t<uint64_t>(st + 48, size);  // st_size
+}
+constexpr uint32_t kStatDirMode = 0x41ED;  // S_IFDIR | 0755
+constexpr size_t kDirSize = 4096;
+
+// Short mnemonic for the syscall-observer trace. Covers the curated set we
+// model; everything else is reported as "sys_<nr>".
+const char* sys_name(Sys s) {
+  switch (s) {
+    case Sys::ClockGettime: return "clock_gettime";
+    case Sys::Gettimeofday: return "gettimeofday";
+    case Sys::Getpid: return "getpid";
+    case Sys::Getuid: return "getuid";
+    case Sys::Geteuid: return "geteuid";
+    case Sys::Gettid: return "gettid";
+    case Sys::Exit: return "exit";
+    case Sys::ExitGroup: return "exit_group";
+    case Sys::Mmap: return "mmap";
+    case Sys::Munmap: return "munmap";
+    case Sys::Mprotect: return "mprotect";
+    case Sys::Openat: return "openat";
+    case Sys::Read: return "read";
+    case Sys::Write: return "write";
+    case Sys::Close: return "close";
+    case Sys::Lseek: return "lseek";
+    case Sys::Fstat: return "fstat";
+    case Sys::Fstatat: return "fstatat";
+    case Sys::Faccessat: return "faccessat";
+    case Sys::Getrandom: return "getrandom";
+    case Sys::Ptrace: return "ptrace";
+    case Sys::Nanosleep: return "nanosleep";
+    case Sys::Futex: return "futex";
+    case Sys::SetTidAddress: return "set_tid_address";
+    case Sys::SchedGetaffinity: return "sched_getaffinity";
+    case Sys::Prctl: return "prctl";
+    case Sys::Madvise: return "madvise";
+    case Sys::Mremap: return "mremap";
+    case Sys::Readlinkat: return "readlinkat";
+    case Sys::Uname: return "uname";
+    case Sys::Sysinfo: return "sysinfo";
+    case Sys::Getcwd: return "getcwd";
+    case Sys::Fcntl: return "fcntl";
+    case Sys::Ioctl: return "ioctl";
+    case Sys::ClockGetres: return "clock_getres";
+    case Sys::Noop: return "noop";
+    case Sys::Unknown: return "unknown";
+  }
+  return "unknown";
 }
 }  // namespace
 
 void Syscalls::dispatch(Engine& e) {
   const uint64_t nr = e.read_reg(Reg::SyscallNr);
+
+  // Syscall-observer trace: snapshot args on entry and fire (with the final
+  // return value) on EVERY exit path via an RAII guard, so early-returning
+  // handlers (kill/ESRCH, exit) are covered too. No cost when unobserved.
+  struct ObsGuard {
+    Syscalls* self;
+    Engine& e;
+    uint64_t nr;
+    uint64_t args[6];
+    ~ObsGuard() {
+      if (self->observer_)
+        self->observer_(nr, sys_name(normalize(e.abi(), nr)), args,
+                        e.read_reg(Reg::Ret0));
+    }
+  } obs{this, e, nr, {}};
+  if (observer_)
+    for (int i = 0; i < 6; ++i)
+      obs.args[i] = e.read_reg(static_cast<Reg>(static_cast<int>(Reg::A0) + i));
+
   const int psz = e.pointer_size();
   auto ret = [&](uint64_t v) { e.write_reg(Reg::Ret0, v); };
   auto wword = [&](uint64_t addr, uint64_t v) {
@@ -482,23 +548,37 @@ void Syscalls::dispatch(Engine& e) {
       break;
     case Sys::Faccessat: {  // (dirfd, path, mode, flags) -> 0 / -ENOENT
       const std::string path = e.read_cstr(e.read_reg(Reg::A1));
-      const int fd = sys_.vopen(path);
-      if (fd) sys_.vclose(fd);
+      // A served file, a synthetic /proc entry, or a registered app directory
+      // (e.g. the /data/app code dir) all count as "exists".
+      bool ok = sys_.vexists(path);
+      if (!ok) {
+        const int fd = sys_.vopen(path);
+        if (fd) {
+          ok = true;
+          sys_.vclose(fd);
+        }
+      }
       if (std::getenv("VARDOGER_OPEN_LOG"))
         std::fprintf(stderr, "[faccessat] \"%s\" -> %s\n", path.c_str(),
-                     fd ? "ok" : "ENOENT");
-      ret(fd ? 0 : static_cast<uint64_t>(-2));  // exists -> 0, else -ENOENT
+                     ok ? "ok" : "ENOENT");
+      ret(ok ? 0 : static_cast<uint64_t>(-2));  // exists -> 0, else -ENOENT
       break;
     }
     case Sys::Fstatat: {  // (dirfd, path, statbuf, flags)
-      const int fd = sys_.vopen(e.read_cstr(e.read_reg(Reg::A1)));
-      if (!fd) {
-        ret(static_cast<uint64_t>(-2));
+      const std::string path = e.read_cstr(e.read_reg(Reg::A1));
+      const int fd = sys_.vopen(path);
+      if (fd) {  // a regular file
+        write_stat64(e, e.read_reg(Reg::A2), sys_.vsize(fd));
+        sys_.vclose(fd);
+        ret(0);
         break;
       }
-      write_stat64(e, e.read_reg(Reg::A2), sys_.vsize(fd));
-      sys_.vclose(fd);
-      ret(0);
+      if (sys_.is_dir(path)) {  // an installed-app directory
+        write_stat64(e, e.read_reg(Reg::A2), kDirSize, kStatDirMode);
+        ret(0);
+        break;
+      }
+      ret(static_cast<uint64_t>(-2));
       break;
     }
     case Sys::Lseek: {  // (fd, off, whence)

@@ -41,9 +41,37 @@ System::System(Memory& mem, DeviceIdentity id) : mem_(mem), id_(std::move(id)) {
   vfs_.set_provider([this](const std::string& path) { return synth(path); });
 }
 
+void System::register_app_dirs() {
+  // Add a directory and every ancestor down to "/data" so intermediate
+  // stat()/access() calls succeed too.
+  auto add_with_parents = [this](std::string p) {
+    while (p.size() > 1 && p.back() == '/') p.pop_back();
+    while (p.size() > 1) {
+      vfs_.add_dir(p);
+      const auto s = p.find_last_of('/');
+      if (s == std::string::npos || s == 0) break;
+      p = p.substr(0, s);
+    }
+  };
+  auto dirname = [](const std::string& p) {
+    const auto s = p.find_last_of('/');
+    return (s == std::string::npos || s == 0) ? std::string("/")
+                                              : p.substr(0, s);
+  };
+  const std::string& pkg = id_.package_name;
+  add_with_parents(dirname(id_.apk_path));   // code dir (+ ~~ dir + /data/app)
+  add_with_parents(id_.native_lib_dir);      // lib/<arch> (+ lib dir)
+  add_with_parents(id_.data_dir);            // files (+ /data/user/0/<pkg>)
+  add_with_parents("/data/user/0/" + pkg + "/cache");
+  add_with_parents("/data/data/" + pkg + "/cache");
+  add_with_parents("/data/data/" + pkg);
+}
+
 std::string System::get_property(const std::string& name) const {
   auto it = props_.find(name);
-  return it == props_.end() ? std::string{} : it->second;
+  std::string value = it == props_.end() ? std::string{} : it->second;
+  if (prop_observer_) prop_observer_(name, value);
+  return value;
 }
 
 void System::set_property(const std::string& name, std::string value) {

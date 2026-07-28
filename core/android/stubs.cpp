@@ -1724,67 +1724,86 @@ void Stubs::register_system(System& sys) {
   // Model a real listing. DIR* is a host-side token; readdir fills a bionic
   // arm64 struct dirent { u64 d_ino; i64 d_off; u16 d_reclen; u8 d_type; char
   // d_name[256] } (name@19).
+  // DT_* d_type values used in struct dirent.
+  enum : uint8_t { kDtDir = 4, kDtReg = 8, kDtLnk = 10 };
+  struct DirEntry {
+    std::string name;
+    uint8_t type;
+  };
   struct DirState {
-    std::vector<std::string> names;
+    std::vector<DirEntry> ents;
     size_t idx;
     uint64_t buf;
   };
   static std::map<uint64_t, DirState> g_dirs;
   static uint64_t g_dir_token = 0x0D190000ull;
-  auto dir_entries = [&sys](std::string path) -> std::vector<std::string> {
+  auto dir_entries = [&sys](std::string path) -> std::vector<DirEntry> {
     while (path.size() > 1 && path.back() == '/') path.pop_back();
-    std::vector<std::string> out{".", ".."};
-    // Synthetic well-known dirs.
+    // name -> d_type; a directory classification wins over a file one (e.g. a
+    // component seen both as a served file's parent and a registered dir).
+    std::map<std::string, uint8_t> ent;
+    auto put = [&](const std::string& name, uint8_t type) {
+      auto it = ent.find(name);
+      if (it == ent.end())
+        ent[name] = type;
+      else if (type == kDtDir)
+        it->second = kDtDir;
+    };
+    // Synthetic well-known dirs (interfaces are symlinks on a real device).
     if (path == "/sys/class/net") {
-      out.push_back("lo");
-      out.push_back("wlan0");
+      put("lo", kDtLnk);
+      put("wlan0", kDtLnk);
     }
-    // VFS: any served file whose parent dir == path contributes its basename
-    // (dedup).
-    std::set<std::string> seen;
-    for (const auto& kv : sys.vfs().files()) {
-      const std::string& p = kv.first;
-      if (p.size() > path.size() + 1 && p.compare(0, path.size(), path) == 0 &&
-          p[path.size()] == '/') {
-        std::string rest = p.substr(path.size() + 1);
-        std::string comp = rest.substr(0, rest.find('/'));
-        if (!comp.empty() && seen.insert(comp).second) out.push_back(comp);
-      }
-    }
+    // Contribute the immediate child of `full` under `path`: a directory if
+    // `full` lies deeper than one level (an intermediate dir) or is itself a
+    // registered directory, else a regular file (e.g. base.apk in the code dir).
+    auto consider = [&](const std::string& full, bool leaf_is_dir) {
+      if (full.size() <= path.size() + 1 ||
+          full.compare(0, path.size(), path) != 0 || full[path.size()] != '/')
+        return;
+      const std::string rest = full.substr(path.size() + 1);
+      const auto slash = rest.find('/');
+      const std::string comp = rest.substr(0, slash);
+      if (comp.empty()) return;
+      put(comp, (slash != std::string::npos || leaf_is_dir) ? kDtDir : kDtReg);
+    };
+    for (const auto& kv : sys.vfs().files()) consider(kv.first, false);
+    for (const auto& d : sys.vfs().dirs()) consider(d, true);
+
+    std::vector<DirEntry> out{{".", kDtDir}, {"..", kDtDir}};
+    for (const auto& kv : ent) out.push_back({kv.first, kv.second});
     return out;
   };
   add("opendir", [this, dir_entries](Engine& e) {
     const std::string path = e.read_cstr(e.read_reg(Reg::A0));
-    std::vector<std::string> names = dir_entries(path);
+    std::vector<DirEntry> ents = dir_entries(path);
     if (std::getenv("VARDOGER_OPEN_LOG"))
       std::fprintf(stderr, "[opendir] \"%s\" -> %zu entries\n", path.c_str(),
-                   names.size());
+                   ents.size());
     // Return a valid DIR* even for an empty dir (just "."/"."), a real
     // existing-but-empty directory (e.g. a fresh .jiagu cache) is enumerable,
     // not ENOENT. Packers that stat/list their cache dir and then populate it
     // need opendir to SUCCEED here.
     const uint64_t tok = g_dir_token += 0x100;
     const uint64_t buf = mem_.heap_alloc(300);
-    g_dirs[tok] = DirState{std::move(names), 0, buf};
+    g_dirs[tok] = DirState{std::move(ents), 0, buf};
     e.write_reg(Reg::Ret0, tok);
   });
   auto do_readdir = [this](Engine& e) {
     const uint64_t tok = e.read_reg(Reg::A0);
     auto it = g_dirs.find(tok);
-    if (it == g_dirs.end() || it->second.idx >= it->second.names.size()) {
+    if (it == g_dirs.end() || it->second.idx >= it->second.ents.size()) {
       e.write_reg(Reg::Ret0, 0);
       return;
     }
     DirState& d = it->second;
-    const std::string& nm = d.names[d.idx];
+    const DirEntry& de = d.ents[d.idx];
     const uint64_t b = d.buf;
     e.write_t<uint64_t>(b + 0, d.idx + 1);          // d_ino
     e.write_t<int64_t>(b + 8, (int64_t)d.idx + 1);  // d_off
     e.write_t<uint16_t>(b + 16, 275);               // d_reclen
-    e.write_t<uint8_t>(
-        b + 18,
-        nm == "." || nm == ".." ? 4 : 10);  // d_type: DT_DIR / DT_LNK (iface)
-    std::vector<uint8_t> name(nm.begin(), nm.end());
+    e.write_t<uint8_t>(b + 18, de.type);            // d_type (DT_DIR/REG/LNK)
+    std::vector<uint8_t> name(de.name.begin(), de.name.end());
     name.push_back(0);
     e.write(b + 19, name.data(), name.size());
     d.idx++;
@@ -1930,10 +1949,18 @@ void Stubs::register_system(System& sys) {
     const uint64_t buf = e.read_reg(buf_reg);
     if (buf) {
       uint8_t st[128] = {0};
-      const uint32_t mode = 0x81a4;                 // S_IFREG | 0644
-      std::memcpy(st + 0x10, &mode, 4);             // st_mode
-      const uint64_t sz = sys.vsize(sys.vopen(p));  // st_size (best-effort)
-      std::memcpy(st + 0x30, &sz, 8);
+      uint32_t mode = 0x81a4;  // S_IFREG | 0644
+      uint64_t sz = 0;
+      const int fd = sys.vopen(p);
+      if (fd) {  // a regular file
+        sz = sys.vsize(fd);
+        sys.vclose(fd);
+      } else if (sys.is_dir(p)) {  // an installed-app directory
+        mode = 0x41ed;             // S_IFDIR | 0755
+        sz = 4096;
+      }
+      std::memcpy(st + 0x10, &mode, 4);  // st_mode
+      std::memcpy(st + 0x30, &sz, 8);    // st_size
       e.write(buf, st, sizeof st);
     }
     e.write_reg(Reg::Ret0, 0);

@@ -24,6 +24,7 @@
 #include "vardoger/art/art_bringup.hpp"
 #include "vardoger/elf/elf_loader.hpp"
 #include "vardoger/engine/engine.hpp"
+#include "vardoger/engine/gdb_stub.hpp"
 #include "vardoger/engine/memory.hpp"
 #include "vardoger/engine/scheduler.hpp"
 #include "vardoger/engine/trampoline.hpp"
@@ -54,6 +55,9 @@ typedef void (*mv_region_cb)(uint64_t base, uint64_t size, uint32_t prot,
                              const char* label, void* user);
 typedef void (*mv_native_cb)(const char* cls, const char* name, const char* sig,
                              uint64_t fn, void* user);
+typedef void (*mv_prop_cb)(const char* name, const char* value, void* user);
+typedef void (*mv_syscall_cb)(uint64_t nr, const char* name,
+                              const uint64_t* args, uint64_t ret, void* user);
 }
 
 // ---- the VM facade
@@ -76,6 +80,7 @@ struct VM {
   std::unique_ptr<AndroidEnv> android;
   ContextGraph graph;
   std::vector<SoInfo> sos;
+  std::unique_ptr<GdbStub> gdb;  // lazily created by mv_gdb_listen
 
   // stored Python-side callbacks (kept alive here; hooks/handlers dispatch
   // through them)
@@ -142,17 +147,16 @@ const char* mv_last_error() { return g_err.c_str(); }
 VM* mv_new(const char* abi, const char* package, int sdk) {
   try {
     DeviceIdentity id;
-    if (package && *package) {
-      id.package_name = package;
-      id.apk_path = std::string("/data/app/~~pk==/") + package + "-1/base.apk";
-      id.data_dir = std::string("/data/user/0/") + package + "/files";
-      id.native_lib_dir =
-          std::string("/data/app/~~pk==/") + package + "-1/lib/arm64";
-    }
+    if (package && *package) id.package_name = package;
     if (sdk > 0) id.sdk_int = sdk;
     const Abi a =
         (abi && std::strcmp(abi, "arm32") == 0) ? Abi::Arm32 : Abi::Arm64;
-    return new VM(a, std::move(id));
+    // Build a realistic randomized /data/app install path (and lib/data dirs)
+    // for this package + API level, exactly as the Android PackageManager would.
+    apply_install_paths(id, a == Abi::Arm64 ? "arm64" : "arm");
+    VM* vm = new VM(a, std::move(id));
+    vm->sys.register_app_dirs();  // make those directories exist (access/stat)
+    return vm;
   } catch (const std::exception& ex) {
     g_err = ex.what();
     return nullptr;
@@ -265,6 +269,7 @@ void mv_run_init(VM* vm, int i) {
     } catch (const std::exception& ex) {
       g_err = ex.what();
     }
+    if (vm->gdb) vm->gdb->end_run();
   }
 }
 // Drive a guest function through the scheduler (blocking pthreads work); sp
@@ -275,27 +280,39 @@ uint64_t mv_call(VM* vm, uint64_t fn, const uint64_t* args, int nargs) {
     std::vector<uint64_t> a(args, args + nargs);
     // scheduler::run takes an initializer_list; marshal up to 8 args (arm64
     // x0..x7).
+    uint64_t ret = 0;
     switch (nargs) {
       case 0:
-        return vm->sched.run(fn, {});
+        ret = vm->sched.run(fn, {});
+        break;
       case 1:
-        return vm->sched.run(fn, {a[0]});
+        ret = vm->sched.run(fn, {a[0]});
+        break;
       case 2:
-        return vm->sched.run(fn, {a[0], a[1]});
+        ret = vm->sched.run(fn, {a[0], a[1]});
+        break;
       case 3:
-        return vm->sched.run(fn, {a[0], a[1], a[2]});
+        ret = vm->sched.run(fn, {a[0], a[1], a[2]});
+        break;
       case 4:
-        return vm->sched.run(fn, {a[0], a[1], a[2], a[3]});
+        ret = vm->sched.run(fn, {a[0], a[1], a[2], a[3]});
+        break;
       case 5:
-        return vm->sched.run(fn, {a[0], a[1], a[2], a[3], a[4]});
+        ret = vm->sched.run(fn, {a[0], a[1], a[2], a[3], a[4]});
+        break;
       case 6:
-        return vm->sched.run(fn, {a[0], a[1], a[2], a[3], a[4], a[5]});
+        ret = vm->sched.run(fn, {a[0], a[1], a[2], a[3], a[4], a[5]});
+        break;
       case 7:
-        return vm->sched.run(fn, {a[0], a[1], a[2], a[3], a[4], a[5], a[6]});
+        ret = vm->sched.run(fn, {a[0], a[1], a[2], a[3], a[4], a[5], a[6]});
+        break;
       default:
-        return vm->sched.run(fn,
-                             {a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]});
+        ret = vm->sched.run(fn,
+                            {a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]});
+        break;
     }
+    if (vm->gdb) vm->gdb->end_run();
+    return ret;
   } catch (const std::exception& ex) {
     g_err = ex.what();
     return 0;
@@ -313,6 +330,27 @@ uint64_t mv_jni_env(VM* vm) { return vm->jni.jni_env(); }
 uint64_t mv_java_vm(VM* vm) { return vm->javavm; }
 uint64_t mv_app_object(VM* vm) { return vm->graph.application; }
 uint64_t mv_context_object(VM* vm) { return vm->graph.context; }
+
+// The realistic install paths generated for this package (so the caller can
+// serve the APK at the right guest path and see where things live). Each copies
+// up to cap-1 bytes + NUL and returns the full length.
+static int copy_out(const std::string& s, char* out, int cap) {
+  const int n = cap > 0 ? std::min<int>(cap - 1, (int)s.size()) : 0;
+  if (cap > 0) {
+    std::memcpy(out, s.data(), n);
+    out[n] = 0;
+  }
+  return (int)s.size();
+}
+int mv_apk_path(VM* vm, char* out, int cap) {
+  return copy_out(vm->id.apk_path, out, cap);
+}
+int mv_data_dir(VM* vm, char* out, int cap) {
+  return copy_out(vm->id.data_dir, out, cap);
+}
+int mv_native_lib_dir(VM* vm, char* out, int cap) {
+  return copy_out(vm->id.native_lib_dir, out, cap);
+}
 
 // ---- memory / registers ----
 int mv_read(VM* vm, uint64_t addr, uint8_t* out, uint64_t n) {
@@ -404,6 +442,29 @@ uint64_t mv_alloc_trampoline(VM* vm, mv_tramp_cb cb, void* user,
                              const char* name) {
   return vm->tramp.alloc(name ? name : "py_stub",
                          [cb, user](Engine&) { cb(user); });
+}
+
+// ---- gdb/lldb remote debugging ----
+// Open a GDB Remote Serial Protocol server on 127.0.0.1:<port> and block until
+// an external debugger (lldb, gdb, Binary Ninja, IDA) attaches and issues its
+// first continue/step. After this returns 1, drive JNI_OnLoad / a target
+// function with mv_call (or mv_run_init) and it runs under the debugger: set
+// breakpoints during the handshake, then continue. Returns 1 attached, 0 if the
+// client detached during the handshake, -1 on setup error (see mv_last_error).
+int mv_gdb_listen(VM* vm, int port) {
+  try {
+    if (!vm->gdb) vm->gdb = std::make_unique<GdbStub>(vm->e, vm->mem);
+    return vm->gdb->listen(static_cast<uint16_t>(port)) ? 1 : 0;
+  } catch (const std::exception& ex) {
+    g_err = ex.what();
+    return -1;
+  }
+}
+int mv_gdb_attached(VM* vm) {
+  return (vm->gdb && vm->gdb->attached()) ? 1 : 0;
+}
+void mv_gdb_detach(VM* vm) {
+  if (vm->gdb) vm->gdb->detach();
 }
 
 // ---- Java helpers ----
@@ -503,6 +564,25 @@ void mv_set_dex_observer(VM* vm, mv_dex_cb cb, void* user) {
 void mv_registered_natives(VM* vm, mv_native_cb cb, void* user) {
   for (const auto& n : vm->jrt.registered())
     cb(n.cls.c_str(), n.name.c_str(), n.sig.c_str(), n.fn, user);
+}
+
+// ---- monitoring: build properties + syscalls ----
+// Fire cb(name, value) on every system/build property read (ro.build.*,
+// ro.debuggable, ...) the guest performs. Shows exactly which device
+// fingerprints a packer probes.
+void mv_set_property_observer(VM* vm, mv_prop_cb cb, void* user) {
+  vm->sys.set_property_observer(
+      [cb, user](const std::string& name, const std::string& value) {
+        cb(name.c_str(), value.c_str(), user);
+      });
+}
+// Fire cb(nr, name, args[6], ret) on every raw syscall (SVC) the guest issues.
+// `args` points to 6 uint64 (x0..x5); `name` is a short mnemonic. Traces the
+// packer's direct-syscall activity (ptrace/getrandom/mprotect/openat/...).
+void mv_set_syscall_observer(VM* vm, mv_syscall_cb cb, void* user) {
+  vm->syscalls.set_syscall_observer(
+      [cb, user](uint64_t nr, const char* name, const uint64_t args[6],
+                 uint64_t ret) { cb(nr, name, args, ret, user); });
 }
 
 }  // extern "C"

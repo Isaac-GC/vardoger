@@ -14,6 +14,7 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -47,11 +48,18 @@ class Vfs {
   void add_file(const std::string& path, std::string content) {
     store_[path] = std::move(content);
   }
+  // Register a directory so it "exists" (access/stat), the way an installed
+  // app's /data/app/... and /data/user/0/... directories do on a real device.
+  // Trailing slashes are trimmed.
+  void add_dir(const std::string& path);
+  // A directory exists if it was add_dir'd or if any stored file lives under it.
+  bool is_dir(const std::string& path) const;
   bool exists(const std::string& path) const;
   bool unlink(const std::string& path);
   const std::string* content(
       const std::string& path) const;  // peek backing bytes (nullptr if absent)
   const std::map<std::string, std::string>& files() const { return store_; }
+  const std::set<std::string>& dirs() const { return dirs_; }
 
   int open(const std::string& path, int flags);  // fd >= 3, or 0 if unavailable
   bool is_open(int fd) const { return handles_.count(fd) != 0; }
@@ -77,6 +85,7 @@ class Vfs {
 
   std::map<std::string, std::string>
       store_;                      // path -> bytes (preloaded + created)
+  std::set<std::string> dirs_;     // registered directory paths (no trailing /)
   std::map<int, Handle> handles_;  // fd -> open handle
   int next_fd_ = 3;                // 0,1,2 reserved
   Provider provider_;

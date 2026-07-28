@@ -18,6 +18,7 @@ add_library(vardoger_core
         core/engine/memory.cpp
         core/engine/trampoline.cpp
         core/engine/scheduler.cpp
+        core/engine/gdb_stub.cpp
         # elf: the loader
         core/elf/elf_loader.cpp
         # android: the guest OS surface (libc stubs, syscalls, vfs, context)

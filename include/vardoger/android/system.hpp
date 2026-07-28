@@ -7,6 +7,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -23,6 +24,13 @@ class System {
 
   // __system_property_get(name): the fingerprint value, or "" if unknown.
   std::string get_property(const std::string& name) const;
+
+  // Observe every property read (ro.build.*, ro.debuggable, ...) the guest
+  // makes: fires (name, value_returned) for each get_property. Lets an analyst
+  // see exactly which build/device fingerprints a packer probes. One observer.
+  using PropObserver =
+      std::function<void(const std::string& name, const std::string& value)>;
+  void set_property_observer(PropObserver o) { prop_observer_ = std::move(o); }
   // Override/add a property (e.g. a driver simulating a specific OEM device so
   // a device-targeted packer takes its activation path). Empty value ==
   // "absent".
@@ -55,6 +63,15 @@ class System {
   void vclose(int fd) { vfs_.close(fd); }
   bool vexists(const std::string& path) const { return vfs_.exists(path); }
   bool vunlink(const std::string& path) { return vfs_.unlink(path); }
+  bool is_dir(const std::string& path) const { return vfs_.is_dir(path); }
+  void add_dir(const std::string& path) { vfs_.add_dir(path); }
+
+  // Register every directory an installed app has on a real device, derived
+  // from the identity's install paths: the /data/app code dir (+ ~~ package
+  // dir) and lib dir, plus /data/data & /data/user/0 dirs with files/cache, so
+  // a packer that access()/stat()s them finds them present. Call once after the
+  // identity's install paths are set (see apply_install_paths). Idempotent.
+  void register_app_dirs();
 
   // Direct VFS access, e.g. a driver registering a write-observer to capture a
   // decrypted DEX the packer drops to disk, or inspecting the resulting files.
@@ -83,6 +100,7 @@ class System {
   Memory& mem_;
   DeviceIdentity id_;
   std::unordered_map<std::string, std::string> props_;
+  mutable PropObserver prop_observer_;  // fired by the const get_property
   Vfs vfs_;  // read-write virtual filesystem
   uint64_t clock_ns_ = 1'500'000'000ull;
   uint64_t unix_epoch_ = 1'748'736'000ull;  // 2025-06-01 UTC

@@ -8,11 +8,20 @@ from __future__ import annotations
 
 import ctypes as C
 import os
+import sys
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
 _REPO = _HERE.parent.parent  # python/vardoger -> repo root.
-_NAMES = ("libvardoger_capi.so", "libvardoger_capi.dylib", "vardoger_capi.dll")
+# Try the host's native extension FIRST, so a stale cross-built artifact left in
+# build/ (e.g. a Linux .so lingering in a macOS checkout) can't shadow the real
+# one and fail to dlopen.
+if sys.platform == "darwin":
+    _NAMES = ("libvardoger_capi.dylib", "libvardoger_capi.so")
+elif sys.platform == "win32":
+    _NAMES = ("vardoger_capi.dll", "libvardoger_capi.dll")
+else:
+    _NAMES = ("libvardoger_capi.so", "libvardoger_capi.dylib")
 
 
 def _find_lib() -> str:
@@ -63,6 +72,12 @@ REGION_CB = C.CFUNCTYPE(
 NATIVE_CB = C.CFUNCTYPE(
     None, C.c_char_p, C.c_char_p, C.c_char_p, C.c_uint64, C.c_void_p
 )  # (cls, name, sig, fn, user)
+PROP_CB = C.CFUNCTYPE(
+    None, C.c_char_p, C.c_char_p, C.c_void_p
+)  # (name, value, user)
+SYSCALL_CB = C.CFUNCTYPE(
+    None, C.c_uint64, C.c_char_p, C.POINTER(C.c_uint64), C.c_uint64, C.c_void_p
+)  # (nr, name, args[6], ret, user)
 
 VMP = C.c_void_p  # Opaque VM*.
 
@@ -99,6 +114,9 @@ mv_call = _sig("mv_call", C.c_uint64, VMP, C.c_uint64, _u64p, C.c_int)
 
 mv_set_property = _sig("mv_set_property", None, VMP, C.c_char_p, C.c_char_p)
 mv_vfs_add = _sig("mv_vfs_add", None, VMP, C.c_char_p, _u8p, C.c_uint64)
+mv_apk_path = _sig("mv_apk_path", C.c_int, VMP, C.c_char_p, C.c_int)
+mv_data_dir = _sig("mv_data_dir", C.c_int, VMP, C.c_char_p, C.c_int)
+mv_native_lib_dir = _sig("mv_native_lib_dir", C.c_int, VMP, C.c_char_p, C.c_int)
 mv_jni_env = _sig("mv_jni_env", C.c_uint64, VMP)
 mv_java_vm = _sig("mv_java_vm", C.c_uint64, VMP)
 mv_app_object = _sig("mv_app_object", C.c_uint64, VMP)
@@ -162,8 +180,18 @@ mv_object_array_element = _sig(
     "mv_object_array_element", C.c_uint64, VMP, C.c_uint64, C.c_int
 )
 
+mv_gdb_listen = _sig("mv_gdb_listen", C.c_int, VMP, C.c_int)
+mv_gdb_attached = _sig("mv_gdb_attached", C.c_int, VMP)
+mv_gdb_detach = _sig("mv_gdb_detach", None, VMP)
+
 mv_scan_dex = _sig("mv_scan_dex", None, VMP, DEX_CB, C.c_void_p)
 mv_set_dex_observer = _sig("mv_set_dex_observer", None, VMP, DEX_CB, C.c_void_p)
 mv_registered_natives = _sig(
     "mv_registered_natives", None, VMP, NATIVE_CB, C.c_void_p
+)
+mv_set_property_observer = _sig(
+    "mv_set_property_observer", None, VMP, PROP_CB, C.c_void_p
+)
+mv_set_syscall_observer = _sig(
+    "mv_set_syscall_observer", None, VMP, SYSCALL_CB, C.c_void_p
 )

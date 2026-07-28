@@ -86,4 +86,28 @@ struct ContextGraph {
 ContextGraph build_context_graph(JavaRuntime& jrt, const DeviceIdentity& id,
                                  const ContextGraphOptions& opt = {});
 
+// --- Realistic /data/app install paths -------------------------------------
+// Base64url without padding (alphabet A-Za-z0-9-_), exactly how Android's
+// PackageManager encodes the random tokens in the /data/app directory names.
+std::string base64url_nopad(const uint8_t* data, size_t n);
+
+// The /data/app install directory PackageManager creates for `package` at API
+// level `sdk`, using the real randomized scheme seen on a device:
+//   API >= 30 : /data/app/~~<t1>/<package>-<t2>   (Android 11+ "package dir")
+//   API 26..29: /data/app/<package>-<t2>          (Android 8-10 random suffix)
+//   API <  26 : /data/app/<package>-1             (legacy numeric suffix)
+// <t1>/<t2> are distinct 16-byte base64url tokens (22 chars). `seed` makes them
+// reproducible; seed==0 derives a stable seed from the package name, so a given
+// package always maps to the same realistic path across runs. Returns the
+// directory that contains base.apk and lib/<arch>.
+std::string android_code_path(const std::string& package, int sdk,
+                              uint64_t seed = 0);
+
+// Fill id.apk_path, id.native_lib_dir, and id.data_dir from id.package_name and
+// id.sdk_int using android_code_path (data_dir stays the deterministic
+// /data/user/0/<package>/files a real device uses). `lib_arch` is the ABI
+// subdir under lib/ ("arm64" or "arm"). Idempotent.
+void apply_install_paths(DeviceIdentity& id, const std::string& lib_arch = "arm64",
+                         uint64_t seed = 0);
+
 }  // namespace vardoger

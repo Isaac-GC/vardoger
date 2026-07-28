@@ -173,16 +173,36 @@ class VM:
         _n.mv_vfs_add(self._h, guest_path.encode(), buf, len(data))
 
     def serve_apk(self, host_path: str, guest_path: str | None = None) -> bytes:
-        """Serve an APK from disk at the guest apk-path (+ common candidates). Returns its bytes."""
+        """Serve an APK from disk at the guest APK path. Returns its bytes.
+
+        Defaults to the realistic randomized :attr:`apk_path` (what ``getPackageCodePath()`` /
+        ``sourceDir`` return), so a packer that opens its own code path finds the APK. Pass
+        `guest_path` to override.
+        """
         data = open(host_path, "rb").read()
-        pkg = None
-        # The default guest path mirrors mv_new's identity.
-        for p in (guest_path,) if guest_path else ():
-            self.vfs_add(p, data)
-        if not guest_path:
-            # Serve at the identity apk path plus a couple of common candidates.
-            self.vfs_add("/data/app/~~pk==/base.apk", data)
+        self.vfs_add(guest_path or self.apk_path, data)
         return data
+
+    def _path(self, fn) -> str:
+        buf = C.create_string_buffer(1024)
+        fn(self._h, buf, 1024)
+        return buf.value.decode()
+
+    @property
+    def apk_path(self) -> str:
+        """The realistic randomized guest APK path (e.g. ``/data/app/~~<rand>/<pkg>-<rand>/base.apk``)
+        that ``getPackageCodePath()`` returns and where :meth:`serve_apk` serves the APK."""
+        return self._path(_n.mv_apk_path)
+
+    @property
+    def data_dir(self) -> str:
+        """The app data dir (``/data/user/0/<pkg>/files``)."""
+        return self._path(_n.mv_data_dir)
+
+    @property
+    def native_lib_dir(self) -> str:
+        """The native library dir (``.../<pkg>-<rand>/lib/arm64``)."""
+        return self._path(_n.mv_native_lib_dir)
 
     @property
     def jni_env(self) -> int:
@@ -306,6 +326,37 @@ class VM:
         self._keep.append(cb)
         return int(_n.mv_alloc_trampoline(self._h, cb, None, name.encode()))
 
+    # ---- debugging (gdb/lldb) ---------------------------------------------------------------
+    def gdb_listen(self, port: int = 1234) -> bool:
+        """Open a GDB Remote Serial Protocol server on 127.0.0.1:`port` and block until an
+        external debugger attaches and continues, then return so you can drive the target.
+
+        lldb, gdb-multiarch, and the RSP clients in Binary Ninja / IDA all speak this protocol.
+        The typical flow::
+
+            vm.load("lib.so"); vm.run_init(so)
+            vm.gdb_listen(1234)             # blocks; in another terminal:
+            #   lldb -o "gdb-remote 1234"   (or, in gdb:  target remote :1234)
+            #   set breakpoints, then `continue`
+            vm.call(so.jni_onload, [vm.java_vm, 0])   # runs under the debugger
+
+        Breakpoints, single-stepping, register and memory access all work against the emulated
+        ARM64 CPU. Returns True once attached and the client has resumed; False if the debugger
+        detached during the handshake.
+        """
+        r = _n.mv_gdb_listen(self._h, int(port))
+        if r < 0:
+            raise VardogerError(_n.mv_last_error().decode())
+        return r == 1
+
+    @property
+    def gdb_attached(self) -> bool:
+        return _n.mv_gdb_attached(self._h) == 1
+
+    def gdb_detach(self) -> None:
+        """Close the debugger connection and remove the instruction hook."""
+        _n.mv_gdb_detach(self._h)
+
     # ---- Java -------------------------------------------------------------------------------
     def new_string(self, s: str) -> int:
         return int(_n.mv_new_string(self._h, s.encode()))
@@ -417,3 +468,45 @@ class VM:
 
         _n.mv_registered_natives(self._h, cb, None)
         return out
+
+    # ---- monitoring (build properties + syscalls) -------------------------------------------
+    def set_property_observer(
+        self, fn: Callable[[str, str], None]
+    ) -> None:
+        """Call `fn(name, value)` on every system/build property the guest reads.
+
+        Shows which device fingerprints a packer probes (ro.build.fingerprint, ro.debuggable,
+        ro.build.version.sdk, ro.product.model, ...) and the value it got back.
+        """
+
+        @_n.PROP_CB
+        def cb(name, value, _u):
+            fn(
+                name.decode() if name else "",
+                value.decode() if value else "",
+            )
+
+        self._keep.append(cb)
+        _n.mv_set_property_observer(self._h, cb, None)
+
+    def set_syscall_observer(
+        self, fn: Callable[[int, str, list[int], int], None]
+    ) -> None:
+        """Call `fn(nr, name, args, ret)` on every raw syscall (SVC) the guest issues.
+
+        `args` is the 6-element list x0..x5 captured on entry; `ret` is x0 after the handler.
+        Traces direct-syscall activity a packer uses to bypass libc hooks: ptrace anti-debug
+        probes, getrandom, mprotect W^X flips, openat of /proc, futex, etc.
+        """
+
+        @_n.SYSCALL_CB
+        def cb(nr, name, args, ret, _u):
+            fn(
+                int(nr),
+                name.decode() if name else "",
+                [int(args[i]) for i in range(6)],
+                int(ret),
+            )
+
+        self._keep.append(cb)
+        _n.mv_set_syscall_observer(self._h, cb, None)

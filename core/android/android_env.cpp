@@ -1,8 +1,85 @@
 #include "vardoger/android/android_env.hpp"
 
+#include <cstdint>
 #include <cstdlib>
 
 namespace vardoger {
+
+namespace {
+// Deterministic PRNG (splitmix64) seeded from an FNV-1a hash of the package, so
+// the "random" install tokens are stable per package across runs but still look
+// like real device tokens.
+uint64_t fnv1a(const std::string& s) {
+  uint64_t h = 1469598103934665603ull;
+  for (unsigned char c : s) {
+    h ^= c;
+    h *= 1099511628211ull;
+  }
+  return h;
+}
+uint64_t splitmix64(uint64_t& x) {
+  x += 0x9E3779B97F4A7C15ull;
+  uint64_t z = x;
+  z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+  z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+  return z ^ (z >> 31);
+}
+void fill_bytes(uint64_t& state, uint8_t* out, size_t n) {
+  for (size_t i = 0; i < n;) {
+    uint64_t r = splitmix64(state);
+    for (int b = 0; b < 8 && i < n; ++b, ++i)
+      out[i] = static_cast<uint8_t>(r >> (8 * b));
+  }
+}
+}  // namespace
+
+std::string base64url_nopad(const uint8_t* data, size_t n) {
+  static const char* A =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  std::string out;
+  size_t i = 0;
+  for (; i + 3 <= n; i += 3) {
+    uint32_t v = (uint32_t(data[i]) << 16) | (uint32_t(data[i + 1]) << 8) |
+                 data[i + 2];
+    out.push_back(A[(v >> 18) & 63]);
+    out.push_back(A[(v >> 12) & 63]);
+    out.push_back(A[(v >> 6) & 63]);
+    out.push_back(A[v & 63]);
+  }
+  if (n - i == 1) {
+    uint32_t v = uint32_t(data[i]) << 16;
+    out.push_back(A[(v >> 18) & 63]);
+    out.push_back(A[(v >> 12) & 63]);
+  } else if (n - i == 2) {
+    uint32_t v = (uint32_t(data[i]) << 16) | (uint32_t(data[i + 1]) << 8);
+    out.push_back(A[(v >> 18) & 63]);
+    out.push_back(A[(v >> 12) & 63]);
+    out.push_back(A[(v >> 6) & 63]);
+  }
+  return out;
+}
+
+std::string android_code_path(const std::string& package, int sdk,
+                              uint64_t seed) {
+  uint64_t state = seed ? seed : (fnv1a(package) ^ 0xA5A5A5A5A5A5A5A5ull);
+  uint8_t t1[16], t2[16];
+  fill_bytes(state, t1, sizeof t1);  // the ~~ package-dir token
+  fill_bytes(state, t2, sizeof t2);  // the <package>- suffix token
+  const std::string suffix = base64url_nopad(t2, sizeof t2);
+  if (sdk >= 30)
+    return "/data/app/~~" + base64url_nopad(t1, sizeof t1) + "/" + package +
+           "-" + suffix;
+  if (sdk >= 26) return "/data/app/" + package + "-" + suffix;
+  return "/data/app/" + package + "-1";
+}
+
+void apply_install_paths(DeviceIdentity& id, const std::string& lib_arch,
+                         uint64_t seed) {
+  const std::string code = android_code_path(id.package_name, id.sdk_int, seed);
+  id.apk_path = code + "/base.apk";
+  id.native_lib_dir = code + "/lib/" + lib_arch;
+  id.data_dir = "/data/user/0/" + id.package_name + "/files";
+}
 
 AndroidEnv::AndroidEnv(JavaRuntime& jrt, DeviceIdentity id)
     : jrt_(jrt), id_(std::move(id)) {

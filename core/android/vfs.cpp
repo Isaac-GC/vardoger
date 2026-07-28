@@ -5,8 +5,25 @@
 
 namespace vardoger {
 
+void Vfs::add_dir(const std::string& path) {
+  std::string p = path;
+  while (p.size() > 1 && p.back() == '/') p.pop_back();
+  if (!p.empty()) dirs_.insert(p);
+}
+
+bool Vfs::is_dir(const std::string& path) const {
+  std::string p = path;
+  while (p.size() > 1 && p.back() == '/') p.pop_back();
+  if (dirs_.count(p)) return true;
+  // Or an implied directory: some stored file lives under "<p>/".
+  const std::string prefix = p + "/";
+  auto it = store_.lower_bound(prefix);
+  return it != store_.end() && it->first.compare(0, prefix.size(), prefix) == 0;
+}
+
 bool Vfs::exists(const std::string& path) const {
   if (store_.count(path)) return true;
+  if (is_dir(path)) return true;
   return provider_ && provider_(path).has_value();
 }
 
