@@ -15,12 +15,15 @@ jobs:
       # cross-compile. before-all installs Unicorn/Capstone via each platform's
       # package manager (brew / build-from-source), which only provides the
       # runner's own arch, so cross-building can't link.
+      # macos_target must match the OS the runner's brew bottles are built for:
+      # delocate rejects bundling a lib whose min-target exceeds the wheel's tag,
+      # and brew's unicorn/capstone on macos-14 require 14.0 (macos-13 -> 13.0).
       matrix:
         include:
           - { os: ubuntu-latest, archs: x86_64 }     # manylinux x86_64
           - { os: ubuntu-24.04-arm, archs: aarch64 } # manylinux aarch64 (native ARM runner)
-          - { os: macos-14, archs: arm64 }           # Apple Silicon
-          - { os: macos-13, archs: x86_64 }          # Intel
+          - { os: macos-14, archs: arm64, macos_target: "14.0" }  # Apple Silicon
+          - { os: macos-13, archs: x86_64, macos_target: "13.0" } # Intel
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -31,6 +34,9 @@ jobs:
       - uses: pypa/cibuildwheel@v2.21
         env:
           CIBW_ARCHS: ${{ matrix.archs }}
+          # Ignored by the Linux builds; on macOS it sets the wheel's min-target
+          # to match the bundled brew libs so delocate accepts them.
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_target }}
 
       - uses: actions/upload-artifact@v4
         with:
