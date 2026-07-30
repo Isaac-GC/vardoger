@@ -104,7 +104,8 @@ std::optional<std::string> System::synth(const std::string& path) const {
            "Gid:\t10234\t10234\t10234\t10234\n";
   }
   if (path == "/proc/self/cmdline") {
-    return id_.package_name + std::string(1, '\0');
+    return (progname_.empty() ? id_.package_name : progname_) +
+           std::string(1, '\0');
   }
   // /proc/<ppid>/cmdline & /proc/<ppid>/comm: anti-debug guardians read the
   // PARENT's cmdline and require it to be zygote/zygote64 (a normal Android app

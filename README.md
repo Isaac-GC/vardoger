@@ -144,6 +144,21 @@ vm.native_lib_dir    # .../com.foo.bar-89Cv5G39stefHG-UWUETNQ/lib/arm64
 vm.serve_apk("base.apk")   # served at vm.apk_path
 ```
 
+### Process name (`__progname`)
+
+The guest sees its process name via the bionic globals `__progname` /
+`program_invocation_short_name` / `getprogname()` and `/proc/self/cmdline`, all defaulting to the
+package name. Some RASP (e.g. LIApp) gate their self-decrypt on `__progname` matching the package and
+fail **silently** otherwise — the usual reason a `.so` loaded in isolation never decrypts. Set the
+real package on the `VM`, or override the name directly:
+
+```python
+vm = VM(package="com.quick.z", sdk=31)   # __progname == "com.quick.z"
+vm.set_progname("com.quick.z")           # explicit override — call BEFORE vm.load()
+```
+
+Or via the environment: `VARDOGER_PROGNAME` (or `MINVM_PROGNAME`).
+
 ## Layout
 
 ```

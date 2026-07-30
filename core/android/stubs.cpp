@@ -204,6 +204,32 @@ uint64_t Stubs::resolve(const std::string& name) {
   return addr;
 }
 
+void Stubs::set_progname(const std::string& name) {
+  // Fresh string buffer each call so the name can grow; the pointer cell is
+  // allocated once and kept stable so a GOT slot already relocated to it stays
+  // valid even if the name changes after load.
+  const uint64_t str =
+      mem_.mmap_alloc(name.size() + 1, UC_PROT_READ | UC_PROT_WRITE, "progname");
+  engine_.write(str, name.c_str(), name.size() + 1);
+  if (!progname_cell_)
+    progname_cell_ =
+        mem_.mmap_alloc(8, UC_PROT_READ | UC_PROT_WRITE, "__progname");
+  engine_.write_t<uint64_t>(progname_cell_, str);
+  progname_str_ = str;
+  // These are DATA symbols: bionic declares `extern const char* __progname;`, so
+  // the loader relocates a reference to the ADDRESS of the char* cell, and guest
+  // code loads [cell] to get the string pointer.
+  by_name_["__progname"] = progname_cell_;
+  by_name_["program_invocation_short_name"] = progname_cell_;
+  by_name_["program_invocation_name"] = progname_cell_;
+  // getprogname() returns the char* itself (not the cell).
+  if (!progname_fn_) {
+    add("getprogname",
+        [this](Engine& e) { e.write_reg(Reg::Ret0, progname_str_); });
+    progname_fn_ = true;
+  }
+}
+
 // Drive one step of the dl_iterate_phdr loop: build dl_phdr_info for the
 // current lib and redirect into the guest callback (which returns to
 // dl_return_stub_). When the list is exhausted, return 0 to the original

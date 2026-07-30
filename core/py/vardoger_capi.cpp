@@ -109,6 +109,19 @@ struct VM {
     sp0 = mem.setup_stack();
     mem.setup_tls();
     stubs.register_defaults();
+    // __progname / getprogname: the guest process name a RASP checks against the
+    // package (e.g. LIApp gates its self-decrypt on it and fails silently when it
+    // mismatches). Default to the package; VARDOGER_PROGNAME / MINVM_PROGNAME
+    // override for isolated loading where the real package can't be set.
+    {
+      std::string progname = id.package_name;
+      if (const char* p = std::getenv("VARDOGER_PROGNAME"); p && *p)
+        progname = p;
+      else if (const char* p = std::getenv("MINVM_PROGNAME"); p && *p)
+        progname = p;
+      stubs.set_progname(progname);
+      sys.set_progname(progname);
+    }
     stubs.set_scheduler(sched);
     jrt.register_android_hierarchy();
     javavm = jni.build();
@@ -327,6 +340,14 @@ uint64_t mv_call(VM* vm, uint64_t fn, const uint64_t* args, int nargs) {
 // ---- config / handles ----
 void mv_set_property(VM* vm, const char* k, const char* v) {
   vm->sys.set_property(k, v);
+}
+// Set the guest process name (__progname / getprogname / /proc/self/cmdline).
+// Call BEFORE loading the .so, since __progname is resolved at load time. Use
+// when a RASP gates on the process name and you can't set the real package.
+void mv_set_progname(VM* vm, const char* name) {
+  const std::string n = name ? name : "";
+  vm->stubs.set_progname(n);
+  vm->sys.set_progname(n);
 }
 void mv_vfs_add(VM* vm, const char* guest, const uint8_t* data, uint64_t n) {
   vm->sys.add_file(guest, std::string((const char*)data, n));

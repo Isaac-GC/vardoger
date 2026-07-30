@@ -25,6 +25,11 @@ class System {
   // __system_property_get(name): the fingerprint value, or "" if unknown.
   std::string get_property(const std::string& name) const;
 
+  // The process name served at /proc/self/cmdline. Defaults to the package name;
+  // kept in sync with the guest's __progname (see Stubs::set_progname) so a RASP
+  // that cross-checks the two sees one consistent value.
+  void set_progname(std::string p) { progname_ = std::move(p); }
+
   // Observe every property read (ro.build.*, ro.debuggable, ...) the guest
   // makes: fires (name, value_returned) for each get_property. Lets an analyst
   // see exactly which build/device fingerprints a packer probes. One observer.
@@ -100,6 +105,7 @@ class System {
   Memory& mem_;
   DeviceIdentity id_;
   std::unordered_map<std::string, std::string> props_;
+  std::string progname_;  // /proc/self/cmdline (empty -> package name)
   mutable PropObserver prop_observer_;  // fired by the const get_property
   Vfs vfs_;  // read-write virtual filesystem
   uint64_t clock_ns_ = 1'500'000'000ull;

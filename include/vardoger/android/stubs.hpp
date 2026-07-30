@@ -47,6 +47,14 @@ class Stubs {
   // logging "unimplemented" stub on first sight of an unknown name.
   uint64_t resolve(const std::string& name);
 
+  // Set the process name the guest reads via the bionic globals __progname /
+  // program_invocation_short_name / program_invocation_name (DATA symbols) and
+  // getprogname(). Defaults to the package name; some RASP (LIApp) gate their
+  // self-decrypt on __progname matching the package and fail SILENTLY otherwise,
+  // which is why isolated loading never decrypts. Call before loading the .so
+  // (imports resolve at load time); idempotent (safe to update).
+  void set_progname(const std::string& name);
+
   // dlsym provider: a driver can supply REAL symbol addresses (e.g. from a
   // libart.so it loaded into the guest) so dlsym() returns the actual function,
   // not a stub. Tried before the stub fallback; return 0 to defer.
@@ -81,6 +89,9 @@ class Stubs {
   Trampoline& tramp_;
   Scheduler* sched_ = nullptr;    // set => cooperative pthreads
   Syscalls* syscalls_ = nullptr;  // set => libc syscall() routes to it
+  uint64_t progname_cell_ = 0;    // char* cell __progname resolves to (stable)
+  uint64_t progname_str_ = 0;     // the name string getprogname() returns
+  bool progname_fn_ = false;      // getprogname() stub registered
   std::function<uint64_t(const std::string&)>
       dlsym_provider_;  // real symbols (e.g. libart)
   // dl_iterate_phdr: loaded-lib registry + in-flight iteration state

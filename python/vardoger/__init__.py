@@ -174,6 +174,16 @@ class VM:
     def set_property(self, key: str, value: str) -> None:
         _n.mv_set_property(self._h, key.encode(), value.encode())
 
+    def set_progname(self, name: str) -> None:
+        """Set the guest process name (``__progname`` / ``getprogname()`` / ``/proc/self/cmdline``).
+
+        Defaults to the package name. Some RASP (e.g. LIApp) gate their self-decrypt on ``__progname``
+        matching the package and fail *silently* otherwise — so if you load a `.so` in isolation
+        without the real package, set it here. **Call before** :meth:`load`, since ``__progname`` is
+        resolved at relocation time. Equivalent to the ``VARDOGER_PROGNAME`` / ``MINVM_PROGNAME`` env.
+        """
+        _n.mv_set_progname(self._h, name.encode())
+
     def vfs_add(self, guest_path: str, data: bytes) -> None:
         """Serve `data` at a guest path (the packer's open()/read() see it)."""
         buf = (C.c_uint8 * len(data)).from_buffer_copy(data)
