@@ -104,8 +104,12 @@ std::optional<std::string> System::synth(const std::string& path) const {
            "Gid:\t10234\t10234\t10234\t10234\n";
   }
   if (path == "/proc/self/cmdline") {
-    return (progname_.empty() ? id_.package_name : progname_) +
-           std::string(1, '\0');
+    return progname() + std::string(1, '\0');
+  }
+  if (path == "/proc/self/comm") {  // thread name = progname truncated to 15
+    std::string c = progname();
+    if (c.size() > 15) c.resize(15);
+    return c + "\n";
   }
   // /proc/<ppid>/cmdline & /proc/<ppid>/comm: anti-debug guardians read the
   // PARENT's cmdline and require it to be zygote/zygote64 (a normal Android app

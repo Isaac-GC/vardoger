@@ -29,6 +29,11 @@ class System {
   // kept in sync with the guest's __progname (see Stubs::set_progname) so a RASP
   // that cross-checks the two sees one consistent value.
   void set_progname(std::string p) { progname_ = std::move(p); }
+  // The effective process name (override, else package). comm (PR_GET_NAME /
+  // /proc/self/comm) is this truncated to 15 chars (TASK_COMM_LEN - 1).
+  std::string progname() const {
+    return progname_.empty() ? id_.package_name : progname_;
+  }
 
   // Observe every property read (ro.build.*, ro.debuggable, ...) the guest
   // makes: fires (name, value_returned) for each get_property. Lets an analyst

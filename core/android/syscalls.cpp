@@ -635,10 +635,13 @@ void Syscalls::dispatch(Engine& e) {
     }
     case Sys::Prctl: {  // (option, ...) -> 0 for the naming/vma opts
       const uint64_t opt = e.read_reg(Reg::A0);
-      if (opt == 16) {  // PR_GET_NAME: write a 16-byte thread name
+      if (opt == 16) {  // PR_GET_NAME: write the 16-byte comm (progname[:15]+NUL)
         const uint64_t p = e.read_reg(Reg::A1);
         if (p) {
-          const char nm[16] = "app_process";
+          char nm[16] = {0};
+          const std::string pn = sys_.progname();
+          const size_t n = pn.size() > 15 ? 15 : pn.size();
+          std::memcpy(nm, pn.data(), n);  // nm[n..15] stay 0
           e.write(p, nm, sizeof(nm));
         }
       }

@@ -146,8 +146,9 @@ vm.serve_apk("base.apk")   # served at vm.apk_path
 
 ### Process name (`__progname`)
 
-The guest sees its process name via the bionic globals `__progname` /
-`program_invocation_short_name` / `getprogname()` and `/proc/self/cmdline`, all defaulting to the
+The guest sees its process name consistently everywhere a RASP might look — the bionic globals
+`__progname` / `program_invocation_short_name` / `getprogname()`, `/proc/self/cmdline`, and the comm
+name (`prctl(PR_GET_NAME)` / `/proc/self/comm`, truncated to 15 chars) — all defaulting to the
 package name. Some RASP (e.g. LIApp) gate their self-decrypt on `__progname` matching the package and
 fail **silently** otherwise — the usual reason a `.so` loaded in isolation never decrypts. Set the
 real package on the `VM`, or override the name directly:
