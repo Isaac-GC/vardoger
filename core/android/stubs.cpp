@@ -204,6 +204,11 @@ uint64_t Stubs::resolve(const std::string& name) {
   return addr;
 }
 
+uint64_t Stubs::known(const std::string& name) const {
+  auto it = by_name_.find(name);
+  return it != by_name_.end() ? it->second : 0;
+}
+
 void Stubs::set_progname(const std::string& name) {
   // Fresh string buffer each call so the name can grow; the pointer cell is
   // allocated once and kept stable so a GOT slot already relocated to it stays
@@ -1318,6 +1323,16 @@ void Stubs::register_defaults() {
       if (a) {
         if (std::getenv("VARDOGER_DL_LOG"))
           std::fprintf(stderr, "[dlsym] %s -> REAL %#llx\n", name.c_str(),
+                       (unsigned long long)a);
+        e.write_reg(Reg::Ret0, a);
+        return;
+      }
+    }
+    if (lib_resolver_) {  // a sibling lib loaded into this VM exports it
+      const uint64_t a = lib_resolver_(name);
+      if (a) {
+        if (std::getenv("VARDOGER_DL_LOG"))
+          std::fprintf(stderr, "[dlsym] %s -> sibling-lib %#llx\n", name.c_str(),
                        (unsigned long long)a);
         e.write_reg(Reg::Ret0, a);
         return;

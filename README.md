@@ -160,6 +160,22 @@ vm.set_progname("com.quick.z")           # explicit override — call BEFORE vm.
 
 Or via the environment: `VARDOGER_PROGNAME` (or `MINVM_PROGNAME`).
 
+### Loading multiple libraries
+
+Call `load()` once per `.so` — they share one VM (memory, JNI runtime, VFS, scheduler), so every
+lib's `RegisterNatives` accumulates in one place and each sees the same `java_vm`. Load in dependency
+order (init the lib that drops/decrypts the next one first). A symbol one lib exports resolves for
+another automatically, both as a static import and via `dlopen`/`dlsym`:
+
+```python
+a = vm.load("libpacker.so");  vm.run_init(a)   # exports helpers, drops libpayload.so
+b = vm.load("libpayload.so"); vm.run_init(b)   # imports libpacker's helpers -> resolved to the real fn
+if b.jni_onload: vm.call(b.jni_onload, [vm.java_vm, 0])
+```
+
+Resolution order for an import is: our controlled libc/JNI stubs, then a sibling library's exports,
+then a MISSING logging stub — so a not-yet-loaded sibling can't resolve, exactly like a real linker.
+
 ## Layout
 
 ```

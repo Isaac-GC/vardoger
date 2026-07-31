@@ -140,8 +140,23 @@ struct VM {
       if (tramp.dispatch(en)) return;
       syscalls.dispatch(en);
     });
-    loader.set_import_resolver(
-        [this](const std::string& n) { return stubs.resolve(n); });
+    // Import resolution, in priority order: our controlled libc/JNI stubs, then
+    // a sibling library already loaded into this VM (so multi-.so targets whose
+    // libs import each other link up), then a MISSING logging stub. Load
+    // dependencies first — a symbol from a not-yet-loaded sibling can't resolve,
+    // exactly like a real linker.
+    loader.set_import_resolver([this](const std::string& n) -> uint64_t {
+      if (uint64_t a = stubs.known(n)) return a;
+      for (const auto& so : sos)
+        if (uint64_t a = so.lookup(n)) return a;
+      return stubs.resolve(n);
+    });
+    // dlopen()/dlsym() of a sibling lib resolves to its real exports too.
+    stubs.set_lib_resolver([this](const std::string& n) -> uint64_t {
+      for (const auto& so : sos)
+        if (uint64_t a = so.lookup(n)) return a;
+      return 0;
+    });
     e.on_unmapped(
         [this](Engine& en, uc_mem_type t, uint64_t addr, int, int64_t) -> bool {
           (void)en;

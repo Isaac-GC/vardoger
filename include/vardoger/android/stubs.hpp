@@ -47,6 +47,20 @@ class Stubs {
   // logging "unimplemented" stub on first sight of an unknown name.
   uint64_t resolve(const std::string& name);
 
+  // Address of an ALREADY-known stub for `name` (a registered libc/JNI stub or a
+  // previously-resolved import), or 0 — WITHOUT creating a MISSING stub. Lets the
+  // loader try our controlled stubs first, then sibling-library exports, then
+  // fall back to resolve() for a MISSING stub.
+  uint64_t known(const std::string& name) const;
+
+  // Resolve a symbol against sibling libraries loaded into the same VM (the
+  // C-API wires this to search every SoInfo's exports). Consulted by dlsym after
+  // the dlsym provider, so a packer that dlopen()+dlsym()s a lib it (or we)
+  // loaded lands on the real function.
+  void set_lib_resolver(std::function<uint64_t(const std::string&)> f) {
+    lib_resolver_ = std::move(f);
+  }
+
   // Set the process name the guest reads via the bionic globals __progname /
   // program_invocation_short_name / program_invocation_name (DATA symbols) and
   // getprogname(). Defaults to the package name; some RASP (LIApp) gate their
@@ -94,6 +108,8 @@ class Stubs {
   bool progname_fn_ = false;      // getprogname() stub registered
   std::function<uint64_t(const std::string&)>
       dlsym_provider_;  // real symbols (e.g. libart)
+  std::function<uint64_t(const std::string&)>
+      lib_resolver_;  // sibling-library exports (dlsym cross-lib)
   // dl_iterate_phdr: loaded-lib registry + in-flight iteration state
   // (host-side, persists across the guest-callback redirects).
   std::vector<PhdrLib> phdr_libs_;
