@@ -364,6 +364,10 @@ void mv_set_progname(VM* vm, const char* name) {
   vm->stubs.set_progname(n);
   vm->sys.set_progname(n);
 }
+// Pin the wall-clock epoch (seconds since 1970) the guest reads via
+// time()/gettimeofday/clock_gettime(CLOCK_REALTIME) — e.g. to sit inside a
+// packer's license/expiry window.
+void mv_set_now_unix(VM* vm, uint64_t t) { vm->sys.set_now_unix(t); }
 void mv_vfs_add(VM* vm, const char* guest, const uint8_t* data, uint64_t n) {
   vm->sys.add_file(guest, std::string((const char*)data, n));
 }

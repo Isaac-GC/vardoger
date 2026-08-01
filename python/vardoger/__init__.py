@@ -184,6 +184,12 @@ class VM:
         """
         _n.mv_set_progname(self._h, name.encode())
 
+    def set_now_unix(self, t: int) -> None:
+        """Pin the wall-clock epoch (seconds since 1970) the guest reads via
+        ``time()`` / ``gettimeofday`` / ``clock_gettime(CLOCK_REALTIME)`` — e.g. to sit inside a
+        packer's license/expiry window."""
+        _n.mv_set_now_unix(self._h, int(t))
+
     def vfs_add(self, guest_path: str, data: bytes) -> None:
         """Serve `data` at a guest path (the packer's open()/read() see it)."""
         buf = (C.c_uint8 * len(data)).from_buffer_copy(data)
