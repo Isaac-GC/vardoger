@@ -2,8 +2,11 @@
 requires = ["scikit-build-core>=0.8"]
 build-backend = "scikit_build_core.build"
 
+# Distribution name is vardoger-vm (the plain `vardoger` name is taken on PyPI by an
+# unrelated project); the import package is still `vardoger` (see wheel.packages below),
+# so: pip install vardoger-vm  ->  import vardoger.
 [project]
-name = "vardoger"
+name = "vardoger-vm"
 version = "0.3.1"
 description = "Drive the vardoger faithful-Android ARM64 runtime from Python."
 readme = "python/vardoger/README.md"
@@ -19,8 +22,8 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/OWNER/vardoger"
-Source = "https://github.com/OWNER/vardoger"
+Homepage = "https://github.com/Isaac-GC/vardoger"
+Source = "https://github.com/Isaac-GC/vardoger"
 
 # scikit-build-core drives the existing CMakeLists. The SKBUILD branch there installs
 # libvardoger_capi.so into the vardoger package, so the ctypes loader finds it beside __init__.py.
