@@ -100,6 +100,12 @@ class Engine {
   void on_interrupt(IntrHandler h);  // UC_HOOK_INTR (trampoline/syscall split)
   void on_code(CodeHandler h);       // UC_HOOK_CODE (tracer)
   void on_unmapped(UnmappedHandler h);  // UC_HOOK_MEM_UNMAPPED (diagnostics)
+  // Fired when uc_emu_start returns a fatal error (a guest fault), BEFORE run()
+  // throws — so a debugger can report the fault to its client and let the user
+  // inspect (post-mortem) instead of the session dying silently. Gets the error
+  // and the faulting PC. run() still throws afterward (callers handle that).
+  using ErrorHandler = std::function<void(uc_err, uint64_t pc)>;
+  void on_error(ErrorHandler h) { on_error_ = std::move(h); }
 
  private:
   int reg_id(Reg r) const;
@@ -119,6 +125,7 @@ class Engine {
   IntrHandler on_intr_;
   CodeHandler on_code_;
   UnmappedHandler on_unmapped_;
+  ErrorHandler on_error_;
   uc_hook intr_hook_ = 0, code_hook_ = 0, unmapped_hook_ = 0;
 };
 

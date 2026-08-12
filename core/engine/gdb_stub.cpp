@@ -284,6 +284,9 @@ bool GdbStub::listen(uint16_t port) {
   pending_int_ = false;
   last_signal_ = kSigTrap;
   install_hook();
+  // Report guest faults to the client instead of letting Engine::run throw and
+  // kill the session (this is what made "step into" look like a crash).
+  engine_.on_error([this](uc_err, uint64_t pc) { report_fault(pc); });
 
   // Serve the handshake (qSupported, register/memory reads, breakpoint setup)
   // until the client is ready to run. Anything but a clean resume means the
@@ -315,6 +318,19 @@ void GdbStub::close_client() {
   resumed_ = false;
   breakpoints_.clear();
   stepping_ = false;
+}
+
+void GdbStub::report_fault(uint64_t pc) {
+  if (client_fd_ < 0 || !resumed_) return;
+  (void)pc;  // send_stop_reply reads the (faulting) PC from the engine
+  std::fprintf(stderr, "[gdb] guest fault at %#llx -> SIGSEGV (post-mortem)\n",
+               (unsigned long long)pc);
+  send_stop_reply(11);  // SIGSEGV — the T packet carries the faulting pc
+  // Can't resume past a real fault; let the user inspect, then end the session.
+  const Resume r = serve();
+  if (r == Resume::Continue || r == Resume::Step)
+    send_packet("X0b");  // terminated by signal 11
+  close_client();
 }
 
 void GdbStub::end_run() {
@@ -445,8 +461,14 @@ void GdbStub::send_packet(const std::string& payload) {
 
 bool GdbStub::poll_interrupt() {
   char c;
-  const ssize_t n = ::recv(client_fd_, &c, 1, MSG_DONTWAIT);
-  if (n == 1) return c == 0x03;
+  // PEEK first: only an async Ctrl-C (0x03) should interrupt a run. A regular
+  // packet the client sent mid-run must be left in the stream for read_packet,
+  // not consumed here (consuming it would corrupt the next packet).
+  const ssize_t n = ::recv(client_fd_, &c, 1, MSG_DONTWAIT | MSG_PEEK);
+  if (n == 1 && c == 0x03) {
+    ::recv(client_fd_, &c, 1, MSG_DONTWAIT);  // consume the 0x03
+    return true;
+  }
   return false;
 }
 

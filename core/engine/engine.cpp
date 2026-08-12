@@ -226,6 +226,9 @@ void Engine::run(uint64_t start, uint64_t until, uint64_t timeout_us,
       start = pc;  // resume at the fault
       continue;
     }
+    // A fatal guest fault: give a debugger a chance to report it and let the
+    // user inspect (post-mortem) before we unwind by throwing.
+    if (err != UC_ERR_OK && on_error_) on_error_(err, read_reg(Reg::Pc));
     check(err, "uc_emu_start");
     break;
   }

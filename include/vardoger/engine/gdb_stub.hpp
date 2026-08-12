@@ -82,6 +82,9 @@ class GdbStub {
   void handle_packet(const std::string& pkt, std::string& reply,
                      Resume& resume, bool& resumed);
   void send_stop_reply(int signal);
+  // A guest fault (bad fetch/read/write) reached us via Engine::on_error: report
+  // SIGSEGV at `pc` and serve a post-mortem so the client sees where it died.
+  void report_fault(uint64_t pc);
 
   // register table helpers (aarch64 / arm)
   std::string read_all_regs_hex();
