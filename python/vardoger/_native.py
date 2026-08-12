@@ -127,6 +127,7 @@ mv_call = _sig("mv_call", C.c_uint64, VMP, C.c_uint64, _u64p, C.c_int)
 
 mv_set_property = _sig("mv_set_property", None, VMP, C.c_char_p, C.c_char_p)
 mv_set_progname = _sig("mv_set_progname", None, VMP, C.c_char_p)
+mv_set_signing_cert = _sig("mv_set_signing_cert", None, VMP, _u8p, C.c_int)
 mv_set_now_unix = _sig("mv_set_now_unix", None, VMP, C.c_uint64)
 mv_vfs_add = _sig("mv_vfs_add", None, VMP, C.c_char_p, _u8p, C.c_uint64)
 mv_apk_path = _sig("mv_apk_path", C.c_int, VMP, C.c_char_p, C.c_int)

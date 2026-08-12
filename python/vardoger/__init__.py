@@ -184,6 +184,17 @@ class VM:
         """
         _n.mv_set_progname(self._h, name.encode())
 
+    def set_signing_cert(self, der: bytes) -> None:
+        """Set the app's signing certificate DER (what ``Signature.toByteArray()`` returns).
+
+        RASP that SHA-256 the signing cert crash on a mismatch — dpt-shell's ``verifyAppSignature``
+        is the classic case, and most Chinese packers derive keys from it. Feed the real cert
+        extracted from the APK's ``META-INF/*.(RSA|DSA|EC)`` block. **Call before** driving the
+        code that reads the signature.
+        """
+        buf = (C.c_uint8 * len(der)).from_buffer_copy(der)
+        _n.mv_set_signing_cert(self._h, buf, len(der))
+
     def set_now_unix(self, t: int) -> None:
         """Pin the wall-clock epoch (seconds since 1970) the guest reads via
         ``time()`` / ``gettimeofday`` / ``clock_gettime(CLOCK_REALTIME)`` — e.g. to sit inside a

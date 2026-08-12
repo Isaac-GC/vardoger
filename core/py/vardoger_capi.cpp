@@ -364,6 +364,20 @@ void mv_set_progname(VM* vm, const char* name) {
   vm->stubs.set_progname(n);
   vm->sys.set_progname(n);
 }
+// Set the app's signing certificate DER — what Signature.toByteArray() returns.
+// RASP that SHA-256 the signing cert (dpt-shell's verifyAppSignature, and most
+// Chinese packers' key derivation) crash on a mismatch; feed the real cert from
+// the APK's META-INF/*.(RSA|DSA|EC). Re-registers the toByteArray host method,
+// so call it BEFORE driving the code that reads the signature.
+void mv_set_signing_cert(VM* vm, const uint8_t* der, int n) {
+  std::vector<uint8_t> cert(der, der + (n > 0 ? n : 0));
+  vm->id.signing_cert = cert;
+  vm->jrt.register_method(
+      "toByteArray", [cert](JavaRuntime& r, uint64_t,
+                            const std::vector<DvmValue>&) {
+        return DvmValue::O(r.new_byte_array(cert));
+      });
+}
 // Pin the wall-clock epoch (seconds since 1970) the guest reads via
 // time()/gettimeofday/clock_gettime(CLOCK_REALTIME) — e.g. to sit inside a
 // packer's license/expiry window.
