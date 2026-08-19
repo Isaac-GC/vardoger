@@ -91,6 +91,7 @@ SoInfo ElfLoader::load_impl(const std::vector<uint8_t>& data,
   using Phdr = std::conditional_t<Is64, elf::Elf64_Phdr, elf::Elf32_Phdr>;
   using Dyn = std::conditional_t<Is64, elf::Elf64_Dyn, elf::Elf32_Dyn>;
   using Sym = std::conditional_t<Is64, elf::Elf64_Sym, elf::Elf32_Sym>;
+  using Shdr = std::conditional_t<Is64, elf::Elf64_Shdr, elf::Elf32_Shdr>;
   using Rel = std::conditional_t<Is64, elf::Elf64_Rel, elf::Elf32_Rel>;
   using Rela = std::conditional_t<Is64, elf::Elf64_Rela, elf::Elf32_Rela>;
   using Addr = std::conditional_t<Is64, uint64_t, uint32_t>;
@@ -149,6 +150,8 @@ SoInfo ElfLoader::load_impl(const std::vector<uint8_t>& data,
   uint64_t rel = 0, relsz = 0;
   int64_t pltrel = 0;
   uint64_t init_array = 0, init_arraysz = 0;
+  uint64_t preinit_array = 0, preinit_arraysz = 0;
+  uint64_t fini_array = 0, fini_arraysz = 0;
   uint64_t hash = 0, gnu_hash = 0;
   std::vector<uint64_t> needed_offsets;
 
@@ -192,6 +195,21 @@ SoInfo ElfLoader::load_impl(const std::vector<uint8_t>& data,
           break;
         case elf::DT_INIT_ARRAYSZ:
           init_arraysz = d.d_val;
+          break;
+        case elf::DT_PREINIT_ARRAY:
+          preinit_array = so.load_bias + d.d_val;
+          break;
+        case elf::DT_PREINIT_ARRAYSZ:
+          preinit_arraysz = d.d_val;
+          break;
+        case elf::DT_FINI_ARRAY:
+          fini_array = so.load_bias + d.d_val;
+          break;
+        case elf::DT_FINI_ARRAYSZ:
+          fini_arraysz = d.d_val;
+          break;
+        case elf::DT_FINI:
+          so.fini = so.load_bias + d.d_val;
           break;
         case elf::DT_HASH:
           hash = so.load_bias + d.d_val;
@@ -330,6 +348,15 @@ SoInfo ElfLoader::load_impl(const std::vector<uint8_t>& data,
   // load_bias). A correctly-relocated slot always holds an address >=
   // load_bias, so biasing only sub-bias-but-in-span values is a no-op for
   // normal SOs and recovers the real entry for the stripped-reloc case.
+  for (uint64_t o = 0; o + sizeof(Addr) <= preinit_arraysz; o += sizeof(Addr)) {
+    Addr fn = engine_.read_t<Addr>(preinit_array + o);
+    if (fn != 0 && fn != static_cast<Addr>(-1)) {
+      if (fn < so.load_bias && fn < so.size)
+        fn += so.load_bias;  // unrelocated file offset
+      so.preinit_array.push_back(fn);
+    }
+  }
+
   for (uint64_t o = 0; o + sizeof(Addr) <= init_arraysz; o += sizeof(Addr)) {
     Addr fn = engine_.read_t<Addr>(init_array + o);
     if (fn != 0 && fn != static_cast<Addr>(-1)) {
@@ -339,11 +366,39 @@ SoInfo ElfLoader::load_impl(const std::vector<uint8_t>& data,
     }
   }
 
+  for (uint64_t o = 0; o + sizeof(Addr) <= fini_arraysz; o += sizeof(Addr)) {
+    Addr fn = engine_.read_t<Addr>(fini_array + o);
+    if (fn != 0 && fn != static_cast<Addr>(-1)) {
+      if (fn < so.load_bias && fn < so.size)
+        fn += so.load_bias;  // unrelocated file offset
+      so.fini_array.push_back(fn);
+    }
+  }
+
   // --- tighten per-segment protections to the real p_flags ---
   for (const Phdr& ph : loads) {
     const uint64_t seg = page_align_down(so.load_bias + ph.p_vaddr);
     const uint64_t end = page_align_up(so.load_bias + ph.p_vaddr + ph.p_memsz);
     engine_.protect(seg, end - seg, pf_to_uc(ph.p_flags));
+  }
+
+  // --- section headers (optional: often stripped in packed libs) ---
+  // These let a driver reach a NON-STANDARD section a packer inserted (e.g. a
+  // custom ".post_init" pointer table) and invoke it explicitly, since the
+  // linker only ever runs the standard preinit/init/fini arrays.
+  if (eh.e_shoff && eh.e_shnum && eh.e_shstrndx < eh.e_shnum &&
+      eh.e_shoff + static_cast<uint64_t>(eh.e_shnum) * sizeof(Shdr) <= data.size()) {
+    const Shdr shstr = read_at<Shdr>(data, eh.e_shoff + static_cast<uint64_t>(eh.e_shstrndx) * sizeof(Shdr));
+    for (uint16_t i = 0; i < eh.e_shnum; ++i) {
+      const Shdr sh = read_at<Shdr>(data, eh.e_shoff + static_cast<uint64_t>(i) * sizeof(Shdr));
+      const uint64_t nameoff = shstr.sh_offset + sh.sh_name;
+      if (nameoff >= data.size()) continue;
+      std::string nm(reinterpret_cast<const char*>(data.data()) + nameoff);
+      if (nm.empty()) continue;
+      // sh_addr is 0 for non-allocated sections; bias the allocated ones.
+      so.sections[nm] = SoInfo::Section{
+          sh.sh_addr ? so.load_bias + sh.sh_addr : 0, sh.sh_size};
+    }
   }
 
   std::fprintf(
@@ -358,9 +413,41 @@ SoInfo ElfLoader::load_impl(const std::vector<uint8_t>& data,
 }
 
 void ElfLoader::run_init(const SoInfo& so) {
-  // init functions receive (argc, argv, envp); pass plausible empties.
+  // Bionic's order: .preinit_array, then DT_INIT, then .init_array. Each entry
+  // receives (argc, argv, envp); pass plausible empties.
+  for (uint64_t fn : so.preinit_array) engine_.call(fn, {0, 0, 0}, kFiniPage);
   if (so.init) engine_.call(so.init, {0, 0, 0}, kFiniPage);
   for (uint64_t fn : so.init_array) engine_.call(fn, {0, 0, 0}, kFiniPage);
+}
+
+size_t ElfLoader::run_section_array(const SoInfo& so,
+                                    const std::string& section) {
+  const SoInfo::Section sec = so.section(section);
+  if (!sec.addr || !sec.size) return 0;
+  const int psz = engine_.pointer_size();
+  size_t called = 0;
+  for (uint64_t o = 0; o + psz <= sec.size; o += psz) {
+    const uint64_t fn = psz == 8 ? engine_.read_t<uint64_t>(sec.addr + o)
+                                 : engine_.read_t<uint32_t>(sec.addr + o);
+    // Skip the empty/terminator slots the toolchain leaves behind.
+    if (!fn || fn == ~uint64_t(0) || fn == 0xffffffffu) continue;
+    engine_.call(fn, {0, 0, 0}, kFiniPage);
+    ++called;
+  }
+  return called;
+}
+
+uint64_t ElfLoader::call_section(const SoInfo& so, const std::string& section) {
+  const SoInfo::Section sec = so.section(section);
+  if (!sec.addr) return 0;
+  return engine_.call(sec.addr, {0, 0, 0}, kFiniPage);
+}
+
+void ElfLoader::run_fini(const SoInfo& so) {
+  // Destructors run in the mirror order: .fini_array backwards, then DT_FINI.
+  for (auto it = so.fini_array.rbegin(); it != so.fini_array.rend(); ++it)
+    engine_.call(*it, {0, 0, 0}, kFiniPage);
+  if (so.fini) engine_.call(so.fini, {0, 0, 0}, kFiniPage);
 }
 
 // Explicit instantiations so both paths compile in this TU.

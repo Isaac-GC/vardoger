@@ -41,6 +41,7 @@ inline constexpr int64_t DT_NULL = 0, DT_NEEDED = 1, DT_PLTRELSZ = 2,
                          DT_PLTREL = 20, DT_JMPREL = 23, DT_INIT_ARRAY = 25,
                          DT_FINI_ARRAY = 26, DT_INIT_ARRAYSZ = 27,
                          DT_FINI_ARRAYSZ = 28, DT_FLAGS = 30,
+                         DT_PREINIT_ARRAY = 32, DT_PREINIT_ARRAYSZ = 33,
                          DT_GNU_HASH = 0x6ffffef5, DT_FLAGS_1 = 0x6ffffffb;
 
 // ---- symbol table ----
@@ -108,6 +109,17 @@ struct Elf32_Phdr {
       p_align;
 };
 
+struct Elf64_Shdr {
+  uint32_t sh_name, sh_type;
+  uint64_t sh_flags, sh_addr, sh_offset, sh_size;
+  uint32_t sh_link, sh_info;
+  uint64_t sh_addralign, sh_entsize;
+};
+struct Elf32_Shdr {
+  uint32_t sh_name, sh_type, sh_flags, sh_addr, sh_offset, sh_size, sh_link,
+      sh_info, sh_addralign, sh_entsize;
+};
+
 struct Elf64_Dyn {
   int64_t d_tag;
   uint64_t d_val;
@@ -148,6 +160,8 @@ static_assert(sizeof(Elf64_Ehdr) == 64);
 static_assert(sizeof(Elf32_Ehdr) == 52);
 static_assert(sizeof(Elf64_Phdr) == 56);
 static_assert(sizeof(Elf32_Phdr) == 32);
+static_assert(sizeof(Elf64_Shdr) == 64);
+static_assert(sizeof(Elf32_Shdr) == 40);
 static_assert(sizeof(Elf64_Dyn) == 16);
 static_assert(sizeof(Elf32_Dyn) == 8);
 static_assert(sizeof(Elf64_Sym) == 24);

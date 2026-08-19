@@ -172,6 +172,111 @@ Sys normalize(Abi abi, uint64_t nr) {
         return Sys::Unknown;
     }
   }
+  if (abi == Abi::X86_64) {
+    switch (nr) {  // Linux x86_64
+      case 0: return Sys::Read;
+      case 1: return Sys::Write;
+      case 2: return Sys::OpenLegacy;   // open(path,...)
+      case 3: return Sys::Close;
+      case 4: case 6: return Sys::StatPath;  // stat / lstat
+      case 5: return Sys::Fstat;
+      case 8: return Sys::Lseek;
+      case 9: return Sys::Mmap;
+      case 10: return Sys::Mprotect;
+      case 11: return Sys::Munmap;
+      case 12: return Sys::Brk;
+      case 16: return Sys::Ioctl;
+      case 20: return Sys::Writev;
+      case 21: return Sys::AccessLegacy;
+      case 25: return Sys::Mremap;
+      case 28: return Sys::Madvise;
+      case 35: return Sys::Nanosleep;
+      case 39: return Sys::Getpid;
+      case 60: return Sys::Exit;
+      case 63: return Sys::Uname;
+      case 72: return Sys::Fcntl;
+      case 79: return Sys::Getcwd;
+      case 89: return Sys::Readlinkat;  // readlink(path, buf, sz)
+      case 96: return Sys::Gettimeofday;
+      case 99: return Sys::Sysinfo;
+      case 101: return Sys::Ptrace;
+      case 102: return Sys::Getuid;
+      case 104: case 108: return Sys::Getgid;
+      case 107: return Sys::Geteuid;
+      case 157: return Sys::Prctl;
+      case 186: return Sys::Gettid;
+      case 202: return Sys::Futex;
+      case 204: return Sys::SchedGetaffinity;
+      case 218: return Sys::SetTidAddress;
+      case 228: return Sys::ClockGettime;
+      case 229: return Sys::ClockGetres;
+      case 231: return Sys::ExitGroup;
+      case 257: return Sys::Openat;
+      case 262: return Sys::Fstatat;   // newfstatat
+      case 267: return Sys::Readlinkat;
+      case 269: case 439: return Sys::Faccessat;
+      case 318: return Sys::Getrandom;
+      case 13: case 14: case 15:       // rt_sigaction/procmask/return
+      case 24:                          // sched_yield
+      case 62: case 200: case 234:      // kill / tkill / tgkill
+      case 273: case 324: case 334:     // set_robust_list / membarrier / rseq
+        return Sys::Noop;
+      default: return Sys::Unknown;
+    }
+  }
+  if (abi == Abi::X86) {
+    switch (nr) {  // Linux i386 (note: close to, but NOT the same as, ARM EABI)
+      case 1: return Sys::Exit;
+      case 3: return Sys::Read;
+      case 4: return Sys::Write;
+      case 5: return Sys::OpenLegacy;
+      case 6: return Sys::Close;
+      case 19: return Sys::Lseek;
+      case 20: return Sys::Getpid;
+      case 24: case 199: return Sys::Getuid;
+      case 26: return Sys::Ptrace;
+      case 33: return Sys::AccessLegacy;
+      case 45: return Sys::Brk;
+      case 47: case 50: case 200: case 202: return Sys::Getgid;
+      case 49: case 201: return Sys::Geteuid;
+      case 54: return Sys::Ioctl;
+      case 55: return Sys::Fcntl;
+      case 78: return Sys::Gettimeofday;
+      case 90: return Sys::Mmap;    // old_mmap (byte offset)
+      case 91: return Sys::Munmap;
+      case 116: return Sys::Sysinfo;
+      case 122: return Sys::Uname;
+      case 125: return Sys::Mprotect;
+      case 140: return Sys::Llseek;
+      case 146: return Sys::Writev;
+      case 162: return Sys::Nanosleep;
+      case 163: return Sys::Mremap;
+      case 172: return Sys::Prctl;
+      case 183: return Sys::Getcwd;
+      case 192: return Sys::Mmap2;  // page-shifted offset
+      case 195: case 196: return Sys::StatPath;
+      case 197: return Sys::Fstat;
+      case 219: return Sys::Madvise;
+      case 224: return Sys::Gettid;
+      case 240: return Sys::Futex;
+      case 242: return Sys::SchedGetaffinity;
+      case 252: return Sys::ExitGroup;
+      case 258: return Sys::SetTidAddress;
+      case 265: return Sys::ClockGettime;
+      case 266: return Sys::ClockGetres;
+      case 295: return Sys::Openat;
+      case 300: return Sys::Fstatat;   // fstatat64
+      case 305: return Sys::Readlinkat;
+      case 307: case 439: return Sys::Faccessat;
+      case 355: return Sys::Getrandom;
+      case 37: case 238: case 270:     // kill / tkill / tgkill
+      case 158:                         // sched_yield
+      case 173: case 174: case 175:     // rt_sig*
+      case 311: case 375: case 386:     // set_robust_list / membarrier / rseq
+        return Sys::Noop;
+      default: return Sys::Unknown;
+    }
+  }
   switch (nr) {  // arm32 EABI
     case 263:
       return Sys::ClockGettime;
@@ -293,6 +398,28 @@ Sys normalize(Abi abi, uint64_t nr) {
 }
 
 // Fill an arm64 struct stat (st_mode @16, st_size @48) for a served fd.
+// Syscall arguments follow the KERNEL ABI, which is NOT the C ABI: arm32 passes
+// args in r0..r5 (AAPCS32 would put A4+ on the stack), x86_64 uses r10 instead
+// of rcx, and i386 passes them in ebx..ebp (cdecl would put them all on the
+// stack). So the dispatcher must never read arguments via Reg::A0..A7.
+uint64_t sys_arg(Engine& e, int i) {
+  static const int a64[6] = {UC_ARM64_REG_X0, UC_ARM64_REG_X1, UC_ARM64_REG_X2,
+                             UC_ARM64_REG_X3, UC_ARM64_REG_X4, UC_ARM64_REG_X5};
+  static const int a32[6] = {UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2,
+                             UC_ARM_REG_R3, UC_ARM_REG_R4, UC_ARM_REG_R5};
+  static const int x64[6] = {UC_X86_REG_RDI, UC_X86_REG_RSI, UC_X86_REG_RDX,
+                             UC_X86_REG_R10, UC_X86_REG_R8,  UC_X86_REG_R9};
+  static const int x32[6] = {UC_X86_REG_EBX, UC_X86_REG_ECX, UC_X86_REG_EDX,
+                             UC_X86_REG_ESI, UC_X86_REG_EDI, UC_X86_REG_EBP};
+  switch (e.abi()) {
+    case Abi::Arm64:  return e.read_uc_reg(a64[i]);
+    case Abi::Arm32:  return e.read_uc_reg(a32[i]);
+    case Abi::X86_64: return e.read_uc_reg(x64[i]);
+    case Abi::X86:    return e.read_uc_reg(x32[i]);
+  }
+  return 0;
+}
+
 void write_stat64(Engine& e, uint64_t st, size_t size, uint32_t mode = 0x81A4) {
   std::vector<uint8_t> zero(128, 0);
   e.write(st, zero.data(), zero.size());
@@ -377,20 +504,10 @@ void Syscalls::dispatch(Engine& e) {
   } obs{this, e, nr, {}};
   if (observer_)
     for (int i = 0; i < 6; ++i)
-      obs.args[i] = e.read_reg(static_cast<Reg>(static_cast<int>(Reg::A0) + i));
+      obs.args[i] = sys_arg(e, i);
 
   const int psz = e.pointer_size();
   auto ret = [&](uint64_t v) { e.write_reg(Reg::Ret0, v); };
-  // Syscall args follow the KERNEL ABI, not the C ABI: arm64 uses x0..x5 and
-  // arm32 uses r0..r5 — all registers. Reg::A4/A5 must NOT be used here, since
-  // under AAPCS32 those are stack slots and Engine::read_reg rejects them.
-  auto sysarg = [&](int i) -> uint64_t {
-    static const int a64[6] = {UC_ARM64_REG_X0, UC_ARM64_REG_X1, UC_ARM64_REG_X2,
-                               UC_ARM64_REG_X3, UC_ARM64_REG_X4, UC_ARM64_REG_X5};
-    static const int a32[6] = {UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2,
-                               UC_ARM_REG_R3, UC_ARM_REG_R4, UC_ARM_REG_R5};
-    return e.read_uc_reg(e.abi() == Abi::Arm64 ? a64[i] : a32[i]);
-  };
   auto wword = [&](uint64_t addr, uint64_t v) {
     if (psz == 8)
       e.write_t<uint64_t>(addr, v);
@@ -447,7 +564,7 @@ void Syscalls::dispatch(Engine& e) {
       ret(0);
       break;  // i-cache maintenance is a no-op for us
     case Sys::ArmSetTls:  // ARM_set_tls(tp): bionic sets the thread pointer
-      e.write_uc_reg(UC_ARM_REG_C13_C0_3, e.read_reg(Reg::A0));  // TPIDRURO
+      e.write_uc_reg(UC_ARM_REG_C13_C0_3, sys_arg(e, 0));  // TPIDRURO
       ret(0);
       break;
     case Sys::Ptrace:
@@ -462,8 +579,8 @@ void Syscalls::dispatch(Engine& e) {
       break;
 
     case Sys::ClockGettime: {  // (clockid, timespec*)
-      const int clk = static_cast<int>(e.read_reg(Reg::A0));
-      const uint64_t ns = sys_.now_ns(), tp = e.read_reg(Reg::A1);
+      const int clk = static_cast<int>(sys_arg(e, 0));
+      const uint64_t ns = sys_.now_ns(), tp = sys_arg(e, 1);
       const bool wall =
           (clk == 0 || clk == 5);  // CLOCK_REALTIME / _COARSE -> wall time
       const uint64_t sec = wall ? sys_.now_unix() : ns / 1'000'000'000ull;
@@ -476,7 +593,7 @@ void Syscalls::dispatch(Engine& e) {
       break;
     }
     case Sys::Gettimeofday: {  // (timeval*, tz) -> wall time
-      const uint64_t ns = sys_.now_ns(), tv = e.read_reg(Reg::A0);
+      const uint64_t ns = sys_.now_ns(), tv = sys_arg(e, 0);
       wword(tv, sys_.now_unix());
       wword(tv + psz, (ns % 1'000'000'000ull) / 1000);
       ret(0);
@@ -484,14 +601,14 @@ void Syscalls::dispatch(Engine& e) {
     }
     case Sys::Mmap:
     case Sys::Mmap2: {  // (addr,len,prot,flags,fd,off)
-      const uint64_t reqaddr = e.read_reg(Reg::A0);
-      const uint64_t len = e.read_reg(Reg::A1), prot = e.read_reg(Reg::A2);
-      const uint64_t flags = e.read_reg(Reg::A3);
+      const uint64_t reqaddr = sys_arg(e, 0);
+      const uint64_t len = sys_arg(e, 1), prot = sys_arg(e, 2);
+      const uint64_t flags = sys_arg(e, 3);
       // mmap2 (armv7) passes the offset in 4 KiB PAGES, not bytes — scaling it
       // is what makes a file-backed mmap2 read from the right place.
       const uint64_t off =
-          (s == Sys::Mmap2) ? (sysarg(5) << 12) : sysarg(5);
-      const int64_t fd = static_cast<int64_t>(sysarg(4));
+          (s == Sys::Mmap2) ? (sys_arg(e, 5) << 12) : sys_arg(e, 5);
+      const int64_t fd = static_cast<int64_t>(sys_arg(e, 4));
       constexpr uint64_t kMapAnonymous = 0x20, kMapFixed = 0x10;
       if (std::getenv("VARDOGER_MMAP_LOG"))
         std::fprintf(stderr,
@@ -573,14 +690,14 @@ void Syscalls::dispatch(Engine& e) {
       // RWX for in-place (de)compression; stripping exec there breaks the
       // loader. W^X targets FRESH mmap decrypt buffers only (handled in the
       // Mmap case + libc mmap).
-      mem_.protect(e.read_reg(Reg::A0), e.read_reg(Reg::A1),
-                   static_cast<uint32_t>(e.read_reg(Reg::A2)));
+      mem_.protect(sys_arg(e, 0), sys_arg(e, 1),
+                   static_cast<uint32_t>(sys_arg(e, 2)));
       ret(0);
       break;
     }
     case Sys::OpenLegacy: {  // open(path, flags, mode) — path in A0
-      const std::string path = e.read_cstr(e.read_reg(Reg::A0));
-      const int flags = static_cast<int>(e.read_reg(Reg::A1));
+      const std::string path = e.read_cstr(sys_arg(e, 0));
+      const int flags = static_cast<int>(sys_arg(e, 1));
       const int fd = sys_.vopen(path, flags);
       if (std::getenv("VARDOGER_OPEN_LOG"))
         std::fprintf(stderr, "[open] \"%s\" (flags=%#x) -> %s\n", path.c_str(),
@@ -589,7 +706,7 @@ void Syscalls::dispatch(Engine& e) {
       break;
     }
     case Sys::AccessLegacy: {  // access(path, mode) — path in A0
-      const std::string path = e.read_cstr(e.read_reg(Reg::A0));
+      const std::string path = e.read_cstr(sys_arg(e, 0));
       bool ok = sys_.vexists(path);
       if (!ok) {
         const int fd = sys_.vopen(path);
@@ -602,14 +719,14 @@ void Syscalls::dispatch(Engine& e) {
       break;
     }
     case Sys::StatPath: {  // stat64/lstat64(path, statbuf) — path in A0
-      const std::string path = e.read_cstr(e.read_reg(Reg::A0));
+      const std::string path = e.read_cstr(sys_arg(e, 0));
       const int fd = sys_.vopen(path);
       if (fd) {
-        write_stat64(e, e.read_reg(Reg::A1), sys_.vsize(fd));
+        write_stat64(e, sys_arg(e, 1), sys_.vsize(fd));
         sys_.vclose(fd);
         ret(0);
       } else if (sys_.is_dir(path)) {
-        write_stat64(e, e.read_reg(Reg::A1), kDirSize, kStatDirMode);
+        write_stat64(e, sys_arg(e, 1), kDirSize, kStatDirMode);
         ret(0);
       } else {
         ret(static_cast<uint64_t>(-2));
@@ -617,11 +734,11 @@ void Syscalls::dispatch(Engine& e) {
       break;
     }
     case Sys::Llseek: {  // (fd, off_hi, off_lo, result*, whence)
-      const int fd = static_cast<int>(e.read_reg(Reg::A0));
+      const int fd = static_cast<int>(sys_arg(e, 0));
       if (!sys_.is_open(fd)) { ret(static_cast<uint64_t>(-9)); break; }
-      const uint64_t off = (e.read_reg(Reg::A1) << 32) | (e.read_reg(Reg::A2) & 0xffffffffu);
-      const uint64_t resultp = e.read_reg(Reg::A3);
-      const int whence = static_cast<int>(sysarg(4));
+      const uint64_t off = (sys_arg(e, 1) << 32) | (sys_arg(e, 2) & 0xffffffffu);
+      const uint64_t resultp = sys_arg(e, 3);
+      const int whence = static_cast<int>(sys_arg(e, 4));
       const size_t cur = sys_.vtell(fd), sz = sys_.vsize(fd);
       const size_t pos = whence == 1   ? cur + off
                          : whence == 2 ? sz + off
@@ -632,9 +749,9 @@ void Syscalls::dispatch(Engine& e) {
       break;
     }
     case Sys::Writev: {  // (fd, iovec*, iovcnt) -> total bytes "written"
-      const int fd = static_cast<int>(e.read_reg(Reg::A0));
-      const uint64_t iov = e.read_reg(Reg::A1);
-      const int cnt = static_cast<int>(e.read_reg(Reg::A2));
+      const int fd = static_cast<int>(sys_arg(e, 0));
+      const uint64_t iov = sys_arg(e, 1);
+      const int cnt = static_cast<int>(sys_arg(e, 2));
       uint64_t total = 0;
       for (int i = 0; i < cnt && i < 1024; ++i) {
         // struct iovec { void* base; size_t len; } — pointer-sized fields
@@ -657,7 +774,7 @@ void Syscalls::dispatch(Engine& e) {
       // Returning the requested address (or a stable non-zero break for the
       // query form) keeps bionic's malloc from treating it as a hard failure;
       // real allocation goes through mmap anyway.
-      const uint64_t want = e.read_reg(Reg::A0);
+      const uint64_t want = sys_arg(e, 0);
       static uint64_t s_brk = 0;
       if (!s_brk) s_brk = mem_.heap_alloc(0x1000);
       if (want > s_brk) s_brk = want;
@@ -665,8 +782,8 @@ void Syscalls::dispatch(Engine& e) {
       break;
     }
     case Sys::Openat: {  // (dirfd, path, flags, mode)
-      const std::string path = e.read_cstr(e.read_reg(Reg::A1));
-      const int flags = static_cast<int>(e.read_reg(Reg::A2));
+      const std::string path = e.read_cstr(sys_arg(e, 1));
+      const int flags = static_cast<int>(sys_arg(e, 2));
       const int fd = sys_.vopen(path, flags);
       std::fprintf(
           stderr, "[openat] \"%s\" (flags=%#x) -> %s", path.c_str(), flags,
@@ -680,8 +797,8 @@ void Syscalls::dispatch(Engine& e) {
       break;
     }
     case Sys::Read: {  // (fd, buf, count)
-      const int fd = static_cast<int>(e.read_reg(Reg::A0));
-      const uint64_t buf = e.read_reg(Reg::A1), count = e.read_reg(Reg::A2);
+      const int fd = static_cast<int>(sys_arg(e, 0));
+      const uint64_t buf = sys_arg(e, 1), count = sys_arg(e, 2);
       if (!sys_.is_open(fd)) {
         ret(static_cast<uint64_t>(-9));
         break;
@@ -697,8 +814,8 @@ void Syscalls::dispatch(Engine& e) {
       break;
     }
     case Sys::Write: {  // (fd, buf, count)
-      const int fd = static_cast<int>(e.read_reg(Reg::A0));
-      const uint64_t buf = e.read_reg(Reg::A1), count = e.read_reg(Reg::A2);
+      const int fd = static_cast<int>(sys_arg(e, 0));
+      const uint64_t buf = sys_arg(e, 1), count = sys_arg(e, 2);
       if (!sys_.is_open(fd)) {
         ret(count);
         break;
@@ -722,16 +839,16 @@ void Syscalls::dispatch(Engine& e) {
       break;
     }
     case Sys::Close:
-      sys_.vclose(static_cast<int>(e.read_reg(Reg::A0)));
+      sys_.vclose(static_cast<int>(sys_arg(e, 0)));
       ret(0);
       break;
     case Sys::Fstat: {  // (fd, statbuf)
-      const int fd = static_cast<int>(e.read_reg(Reg::A0));
+      const int fd = static_cast<int>(sys_arg(e, 0));
       if (!sys_.is_open(fd)) {
         ret(static_cast<uint64_t>(-9));
         break;
       }
-      write_stat64(e, e.read_reg(Reg::A1), sys_.vsize(fd));
+      write_stat64(e, sys_arg(e, 1), sys_.vsize(fd));
       ret(0);
       break;
     }
@@ -741,7 +858,7 @@ void Syscalls::dispatch(Engine& e) {
       ret(0);
       break;
     case Sys::Faccessat: {  // (dirfd, path, mode, flags) -> 0 / -ENOENT
-      const std::string path = e.read_cstr(e.read_reg(Reg::A1));
+      const std::string path = e.read_cstr(sys_arg(e, 1));
       // A served file, a synthetic /proc entry, or a registered app directory
       // (e.g. the /data/app code dir) all count as "exists".
       bool ok = sys_.vexists(path);
@@ -759,16 +876,16 @@ void Syscalls::dispatch(Engine& e) {
       break;
     }
     case Sys::Fstatat: {  // (dirfd, path, statbuf, flags)
-      const std::string path = e.read_cstr(e.read_reg(Reg::A1));
+      const std::string path = e.read_cstr(sys_arg(e, 1));
       const int fd = sys_.vopen(path);
       if (fd) {  // a regular file
-        write_stat64(e, e.read_reg(Reg::A2), sys_.vsize(fd));
+        write_stat64(e, sys_arg(e, 2), sys_.vsize(fd));
         sys_.vclose(fd);
         ret(0);
         break;
       }
       if (sys_.is_dir(path)) {  // an installed-app directory
-        write_stat64(e, e.read_reg(Reg::A2), kDirSize, kStatDirMode);
+        write_stat64(e, sys_arg(e, 2), kDirSize, kStatDirMode);
         ret(0);
         break;
       }
@@ -776,13 +893,13 @@ void Syscalls::dispatch(Engine& e) {
       break;
     }
     case Sys::Lseek: {  // (fd, off, whence)
-      const int fd = static_cast<int>(e.read_reg(Reg::A0));
+      const int fd = static_cast<int>(sys_arg(e, 0));
       if (!sys_.is_open(fd)) {
         ret(static_cast<uint64_t>(-9));
         break;
       }
-      const int64_t off = static_cast<int64_t>(e.read_reg(Reg::A1));
-      const int whence = static_cast<int>(e.read_reg(Reg::A2));
+      const int64_t off = static_cast<int64_t>(sys_arg(e, 1));
+      const int whence = static_cast<int>(sys_arg(e, 2));
       const size_t cur = sys_.vtell(fd), sz = sys_.vsize(fd);
       const size_t pos = whence == 1   ? cur + off
                          : whence == 2 ? sz + off
@@ -796,7 +913,7 @@ void Syscalls::dispatch(Engine& e) {
       break;
     }
     case Sys::Getrandom: {  // (buf, len, flags)
-      const uint64_t buf = e.read_reg(Reg::A0), len = e.read_reg(Reg::A1);
+      const uint64_t buf = sys_arg(e, 0), len = sys_arg(e, 1);
       std::vector<uint8_t> r(len);
       for (size_t i = 0; i < r.size(); ++i)
         r[i] = static_cast<uint8_t>(0x9E * (i + 1));  // deterministic
@@ -817,7 +934,7 @@ void Syscalls::dispatch(Engine& e) {
       ret(1234);
       break;                       // returns the caller's tid
     case Sys::SchedGetaffinity: {  // (pid, cpusetsize, mask*) -> bytes written
-      const uint64_t sz = e.read_reg(Reg::A1), mask = e.read_reg(Reg::A2);
+      const uint64_t sz = sys_arg(e, 1), mask = sys_arg(e, 2);
       const uint64_t n =
           sz && sz < 128 ? sz
                          : 8;  // present 8 online CPUs (popcount checks pass)
@@ -828,9 +945,9 @@ void Syscalls::dispatch(Engine& e) {
       break;
     }
     case Sys::Prctl: {  // (option, ...) -> 0 for the naming/vma opts
-      const uint64_t opt = e.read_reg(Reg::A0);
+      const uint64_t opt = sys_arg(e, 0);
       if (opt == 16) {  // PR_GET_NAME: write the 16-byte comm (progname[:15]+NUL)
-        const uint64_t p = e.read_reg(Reg::A1);
+        const uint64_t p = sys_arg(e, 1);
         if (p) {
           char nm[16] = {0};
           const std::string pn = sys_.progname();
@@ -846,8 +963,8 @@ void Syscalls::dispatch(Engine& e) {
       ret(0);
       break;             // advisory -> success
     case Sys::Mremap: {  // (old, oldsz, newsz, flags, newaddr) -> grow-copy
-      const uint64_t old = e.read_reg(Reg::A0), oldsz = e.read_reg(Reg::A1),
-                     newsz = e.read_reg(Reg::A2);
+      const uint64_t old = sys_arg(e, 0), oldsz = sys_arg(e, 1),
+                     newsz = sys_arg(e, 2);
       if (newsz <= oldsz) {
         ret(old);
         break;
@@ -863,8 +980,8 @@ void Syscalls::dispatch(Engine& e) {
       break;
     }
     case Sys::Readlinkat: {  // (dirfd, path, buf, bufsiz)
-      const std::string path = e.read_cstr(e.read_reg(Reg::A1));
-      const uint64_t buf = e.read_reg(Reg::A2), bufsiz = e.read_reg(Reg::A3);
+      const std::string path = e.read_cstr(sys_arg(e, 1));
+      const uint64_t buf = sys_arg(e, 2), bufsiz = sys_arg(e, 3);
       std::string tgt;
       if (path.find("self/exe") != std::string::npos)
         tgt = "/system/bin/app_process64";
@@ -880,7 +997,7 @@ void Syscalls::dispatch(Engine& e) {
       break;
     }
     case Sys::Uname: {  // struct utsname: 6 x 65-byte fields
-      const uint64_t p = e.read_reg(Reg::A0);
+      const uint64_t p = sys_arg(e, 0);
       std::vector<uint8_t> u(6 * 65, 0);
       auto put = [&](int i, const char* s) {
         std::snprintf(reinterpret_cast<char*>(u.data() + i * 65), 65, "%s", s);
@@ -897,7 +1014,7 @@ void Syscalls::dispatch(Engine& e) {
     }
     case Sys::Sysinfo: {  // struct sysinfo (arm64): uptime@0, loads@8,
       const uint64_t p =
-          e.read_reg(Reg::A0);  // totalram@40, freeram@48, mem_unit@112(u32)
+          sys_arg(e, 0);  // totalram@40, freeram@48, mem_unit@112(u32)
       std::vector<uint8_t> s(128, 0);
       auto u64 = [&](int off, uint64_t v) {
         std::memcpy(s.data() + off, &v, 8);
@@ -913,7 +1030,7 @@ void Syscalls::dispatch(Engine& e) {
       break;
     }
     case Sys::Getcwd: {  // (buf, size) -> writes path incl NUL, returns len
-      const uint64_t buf = e.read_reg(Reg::A0), sz = e.read_reg(Reg::A1);
+      const uint64_t buf = sys_arg(e, 0), sz = sys_arg(e, 1);
       const std::string cwd = "/";
       if (buf && sz > cwd.size()) e.write(buf, cwd.c_str(), cwd.size() + 1);
       ret(buf);  // bionic getcwd returns the buffer ptr
@@ -926,7 +1043,7 @@ void Syscalls::dispatch(Engine& e) {
       ret(0);
       break;                  // TCGETS/etc. -> 0 (not a tty, but harmless)
     case Sys::ClockGetres: {  // (clockid, timespec*) -> 1ns resolution
-      const uint64_t tp = e.read_reg(Reg::A1);
+      const uint64_t tp = sys_arg(e, 1);
       if (tp) {
         wword(tp, 0);
         wword(tp + psz, 1);

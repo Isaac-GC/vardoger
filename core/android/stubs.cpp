@@ -540,30 +540,61 @@ void Stubs::register_defaults() {
   // was wired. Crucial for syscall(gettid) in __cxa_guard/pthread_once
   // static-init guards (see set_syscalls()).
   add("syscall", [this](Engine& e) {
+    // libc syscall(nr, ...): shift C-ABI arguments into KERNEL-ABI registers and
+    // run the normal dispatcher. The two ABIs differ per arch and neither maps
+    // onto Reg::A* safely (A4+ is stack on arm32, A6+ on x86_64, and i386 passes
+    // everything on the stack), so use raw registers / the stack directly.
+    const Abi abi = e.abi();
+    // --- read the C-ABI arguments: nr, then up to 6 syscall arguments ---
+    uint64_t nr = 0, a[6] = {0, 0, 0, 0, 0, 0};
+    if (abi == Abi::X86) {
+      // cdecl: [esp] = return address, arguments follow.
+      const uint64_t sp = e.read_reg(Reg::Sp);
+      nr = e.read_t<uint32_t>(sp + 4);
+      for (int i = 0; i < 6; ++i) a[i] = e.read_t<uint32_t>(sp + 8 + 4 * i);
+    } else {
+      static const int c_a64[8] = {UC_ARM64_REG_X0, UC_ARM64_REG_X1, UC_ARM64_REG_X2,
+                                   UC_ARM64_REG_X3, UC_ARM64_REG_X4, UC_ARM64_REG_X5,
+                                   UC_ARM64_REG_X6, UC_ARM64_REG_X7};
+      static const int c_a32[4] = {UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2,
+                                   UC_ARM_REG_R3};
+      static const int c_x64[6] = {UC_X86_REG_RDI, UC_X86_REG_RSI, UC_X86_REG_RDX,
+                                   UC_X86_REG_RCX, UC_X86_REG_R8, UC_X86_REG_R9};
+      const int* creg = abi == Abi::Arm64 ? c_a64
+                        : abi == Abi::Arm32 ? c_a32 : c_x64;
+      const int ncreg = abi == Abi::Arm64 ? 8 : abi == Abi::Arm32 ? 4 : 6;
+      nr = e.read_uc_reg(creg[0]);
+      // Arguments beyond the register set were passed on the stack by the
+      // caller; we only forward the register-passed ones (enough for every
+      // syscall a packer actually issues through this wrapper).
+      for (int i = 0; i + 1 < ncreg && i < 6; ++i) a[i] = e.read_uc_reg(creg[i + 1]);
+    }
     if (!syscalls_) {
       if (std::getenv("VARDOGER_MMAP_LOG"))
-        std::fprintf(
-            stderr, "[syscall-import] nr=%#llx NO DISPATCHER -> -ENOSYS(-38)\n",
-            (unsigned long long)e.read_reg(Reg::A0));
+        std::fprintf(stderr,
+                     "[syscall-import] nr=%#llx NO DISPATCHER -> -ENOSYS(-38)\n",
+                     (unsigned long long)nr);
       e.write_reg(Reg::Ret0, static_cast<uint64_t>(-38));
-      return;  // -ENOSYS
+      return;
     }
     if (std::getenv("VARDOGER_MMAP_LOG"))
       std::fprintf(stderr, "[syscall-import] nr=%#llx a1=%#llx a2=%#llx\n",
-                   (unsigned long long)e.read_reg(Reg::A0),
-                   (unsigned long long)e.read_reg(Reg::A1),
-                   (unsigned long long)e.read_reg(Reg::A2));
-    const uint64_t nr = e.read_reg(Reg::A0);
-    const uint64_t a[6] = {e.read_reg(Reg::A1), e.read_reg(Reg::A2),
-                           e.read_reg(Reg::A3), e.read_reg(Reg::A4),
-                           e.read_reg(Reg::A5), e.read_reg(Reg::A6)};
+                   (unsigned long long)nr, (unsigned long long)a[0],
+                   (unsigned long long)a[1]);
+    // --- write them where the kernel ABI expects ---
+    static const int k_a64[6] = {UC_ARM64_REG_X0, UC_ARM64_REG_X1, UC_ARM64_REG_X2,
+                                 UC_ARM64_REG_X3, UC_ARM64_REG_X4, UC_ARM64_REG_X5};
+    static const int k_a32[6] = {UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2,
+                                 UC_ARM_REG_R3, UC_ARM_REG_R4, UC_ARM_REG_R5};
+    static const int k_x64[6] = {UC_X86_REG_RDI, UC_X86_REG_RSI, UC_X86_REG_RDX,
+                                 UC_X86_REG_R10, UC_X86_REG_R8, UC_X86_REG_R9};
+    static const int k_x32[6] = {UC_X86_REG_EBX, UC_X86_REG_ECX, UC_X86_REG_EDX,
+                                 UC_X86_REG_ESI, UC_X86_REG_EDI, UC_X86_REG_EBP};
+    const int* kreg = abi == Abi::Arm64 ? k_a64
+                      : abi == Abi::Arm32 ? k_a32
+                      : abi == Abi::X86_64 ? k_x64 : k_x32;
     e.write_reg(Reg::SyscallNr, nr);
-    e.write_reg(Reg::A0, a[0]);
-    e.write_reg(Reg::A1, a[1]);
-    e.write_reg(Reg::A2, a[2]);
-    e.write_reg(Reg::A3, a[3]);
-    e.write_reg(Reg::A4, a[4]);
-    e.write_reg(Reg::A5, a[5]);
+    for (int i = 0; i < 6; ++i) e.write_uc_reg(kreg[i], a[i]);
     syscalls_->dispatch(e);  // sets Ret0
   });
 

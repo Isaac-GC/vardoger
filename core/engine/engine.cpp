@@ -417,6 +417,19 @@ void Engine::on_interrupt(IntrHandler h) {
     check(uc_hook_add(uc_, &intr_hook_, UC_HOOK_INTR,
                       reinterpret_cast<void*>(&Engine::intr_thunk), this, 1, 0),
           "uc_hook_add(INTR)");
+  // On x86_64 the `syscall` instruction is NOT an interrupt, so UC_HOOK_INTR
+  // never sees it — real guest syscalls need this instruction hook. (Our own
+  // trampolines use `int 0x80`, which does come through UC_HOOK_INTR.)
+  if (abi_ == Abi::X86_64 && !syscall_hook_)
+    check(uc_hook_add(uc_, &syscall_hook_, UC_HOOK_INSN,
+                      reinterpret_cast<void*>(&Engine::syscall_thunk), this, 1,
+                      0, UC_X86_INS_SYSCALL),
+          "uc_hook_add(INSN:syscall)");
+}
+
+void Engine::syscall_thunk(uc_engine*, void* user) {
+  auto* self = static_cast<Engine*>(user);
+  if (self->on_intr_) self->on_intr_(*self, 0x80);  // same route as SVC/int 0x80
 }
 
 void Engine::on_code(CodeHandler h) {

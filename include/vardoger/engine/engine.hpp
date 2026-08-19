@@ -117,6 +117,8 @@ class Engine {
   std::function<void(uint64_t)> wx_page_cb_;
 
   static void intr_thunk(uc_engine*, uint32_t intno, void* user);
+  // x86_64 `syscall` raises no interrupt; it needs its own instruction hook.
+  static void syscall_thunk(uc_engine*, void* user);
   static void code_thunk(uc_engine*, uint64_t addr, uint32_t size, void* user);
   static bool unmapped_thunk(uc_engine*, uc_mem_type, uint64_t addr, int size,
                              int64_t value, void* user);
@@ -128,7 +130,7 @@ class Engine {
   CodeHandler on_code_;
   UnmappedHandler on_unmapped_;
   ErrorHandler on_error_;
-  uc_hook intr_hook_ = 0, code_hook_ = 0, unmapped_hook_ = 0;
+  uc_hook intr_hook_ = 0, code_hook_ = 0, unmapped_hook_ = 0, syscall_hook_ = 0;
 };
 
 }  // namespace vardoger
