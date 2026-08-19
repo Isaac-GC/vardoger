@@ -22,6 +22,8 @@ inline constexpr unsigned char ELFDATA2LSB = 1;
 inline constexpr uint16_t ET_DYN = 3;
 inline constexpr uint16_t EM_ARM = 40;
 inline constexpr uint16_t EM_AARCH64 = 183;
+inline constexpr uint16_t EM_386 = 3;
+inline constexpr uint16_t EM_X86_64 = 62;
 
 // ---- program header types / flags ----
 inline constexpr uint32_t PT_LOAD = 1;
@@ -51,6 +53,16 @@ inline constexpr uint32_t R_AARCH64_ABS64 = 257;
 inline constexpr uint32_t R_AARCH64_GLOB_DAT = 1025;
 inline constexpr uint32_t R_AARCH64_JUMP_SLOT = 1026;
 inline constexpr uint32_t R_AARCH64_RELATIVE = 1027;
+// ---- relocation types (x86-64) ----
+inline constexpr uint32_t R_X86_64_64 = 1;
+inline constexpr uint32_t R_X86_64_GLOB_DAT = 6;
+inline constexpr uint32_t R_X86_64_JUMP_SLOT = 7;
+inline constexpr uint32_t R_X86_64_RELATIVE = 8;
+// ---- relocation types (i386) ----
+inline constexpr uint32_t R_386_32 = 1;
+inline constexpr uint32_t R_386_GLOB_DAT = 6;
+inline constexpr uint32_t R_386_JMP_SLOT = 7;
+inline constexpr uint32_t R_386_RELATIVE = 8;
 // ---- relocation types (ARM) ----
 inline constexpr uint32_t R_ARM_ABS32 = 2;
 inline constexpr uint32_t R_ARM_GLOB_DAT = 21;

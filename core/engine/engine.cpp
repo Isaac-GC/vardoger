@@ -14,9 +14,27 @@ void check(uc_err err, const char* what) {
 }  // namespace
 
 Engine::Engine(Abi abi) : abi_(abi) {
-  const uc_arch arch = (abi_ == Abi::Arm64) ? UC_ARCH_ARM64 : UC_ARCH_ARM;
-  // Thumb vs ARM on arm32 is selected per-run from CPSR.T (see run()).
-  check(uc_open(arch, UC_MODE_ARM, &uc_), "uc_open");
+  uc_arch arch;
+  uc_mode mode;
+  switch (abi_) {
+    case Abi::Arm64:
+      arch = UC_ARCH_ARM64;
+      mode = UC_MODE_ARM;  // Thumb vs ARM (arm32) is per-run from CPSR.T
+      break;
+    case Abi::Arm32:
+      arch = UC_ARCH_ARM;
+      mode = UC_MODE_ARM;
+      break;
+    case Abi::X86:
+      arch = UC_ARCH_X86;
+      mode = UC_MODE_32;
+      break;
+    case Abi::X86_64:
+      arch = UC_ARCH_X86;
+      mode = UC_MODE_64;
+      break;
+  }
+  check(uc_open(arch, mode, &uc_), "uc_open");
   // Select a CPU model that implements FEAT_LSE (large-system atomics:
   // ldadd/swp/cas/..). The default arm64 model lacks it, so LSE atomics -
   // emitted by modern clang for std::atomic/shared_ptr refcounts when the
@@ -63,7 +81,7 @@ int Engine::reg_id(Reg r) const {
       case Reg::SyscallNr:
         return UC_ARM64_REG_X8;
     }
-  } else {
+  } else if (abi_ == Abi::Arm32) {
     switch (r) {
       case Reg::A0:
       case Reg::Ret0:
@@ -90,6 +108,58 @@ int Engine::reg_id(Reg r) const {
         throw std::runtime_error(
             "arm32: argument slots A4..A7 live on the stack, not in registers; "
             "use the ABI/Args helper rather than read_reg/write_reg");
+    }
+  }
+  if (abi_ == Abi::X86_64) {
+    // System V AMD64: args rdi,rsi,rdx,rcx,r8,r9; returns rax(,rdx).
+    // NOTE: the *kernel* (syscall) ABI differs — it uses r10 for arg 3 and rax
+    // for the number — so the syscall layer reads its own registers directly.
+    switch (r) {
+      case Reg::A0: return UC_X86_REG_RDI;
+      case Reg::A1: return UC_X86_REG_RSI;
+      case Reg::A2: return UC_X86_REG_RDX;
+      case Reg::A3: return UC_X86_REG_RCX;
+      case Reg::A4: return UC_X86_REG_R8;
+      case Reg::A5: return UC_X86_REG_R9;
+      case Reg::Ret0:
+      case Reg::SyscallNr: return UC_X86_REG_RAX;
+      case Reg::Ret1: return UC_X86_REG_RDX;
+      case Reg::Sp: return UC_X86_REG_RSP;
+      case Reg::Pc: return UC_X86_REG_RIP;
+      case Reg::A6:
+      case Reg::A7:
+        throw std::runtime_error(
+            "x86_64: argument slots A6/A7 live on the stack, not in registers; "
+            "use the ABI/Args helper rather than read_reg/write_reg");
+      case Reg::Lr:
+        throw std::runtime_error(
+            "x86_64 has no link register: the return address is on the stack "
+            "(Engine::call pushes it)");
+    }
+  }
+  if (abi_ == Abi::X86) {
+    // cdecl: every argument is stack-passed; only returns/sp/pc are registers.
+    switch (r) {
+      case Reg::Ret0:
+      case Reg::SyscallNr: return UC_X86_REG_EAX;
+      case Reg::Ret1: return UC_X86_REG_EDX;
+      case Reg::Sp: return UC_X86_REG_ESP;
+      case Reg::Pc: return UC_X86_REG_EIP;
+      case Reg::A0:
+      case Reg::A1:
+      case Reg::A2:
+      case Reg::A3:
+      case Reg::A4:
+      case Reg::A5:
+      case Reg::A6:
+      case Reg::A7:
+        throw std::runtime_error(
+            "x86 (cdecl): all arguments live on the stack, not in registers; "
+            "use the ABI/Args helper rather than read_reg/write_reg");
+      case Reg::Lr:
+        throw std::runtime_error(
+            "x86 has no link register: the return address is on the stack "
+            "(Engine::call pushes it)");
     }
   }
   throw std::runtime_error("reg_id: unmapped register role");
@@ -236,8 +306,34 @@ void Engine::run(uint64_t start, uint64_t until, uint64_t timeout_us,
 
 void Engine::stop() { check(uc_emu_stop(uc_), "uc_emu_stop"); }
 
+// Put the return address where the callee's `ret` will find it: a link register
+// on ARM, or pushed on the stack (what `call` would have done) on x86. Must run
+// AFTER set_args so stack-passed arguments sit above the return address.
+void Engine::set_return_address(uint64_t magic_return) {
+  if (!kRetAddrOnStack(abi_)) {
+    write_reg(Reg::Lr, magic_return);
+    return;
+  }
+  const int psz = pointer_size();
+  // Do NOT realign here: set_args() already aligned the stack and may have
+  // pushed stack-passed arguments below it — realigning would clobber them.
+  uint64_t sp = read_reg(Reg::Sp) - psz;
+  if (psz == 8)
+    write_t<uint64_t>(sp, magic_return);
+  else
+    write_t<uint32_t>(sp, static_cast<uint32_t>(magic_return));
+  write_reg(Reg::Sp, sp);
+}
+
 void Engine::set_args(std::initializer_list<uint64_t> args) {
-  const int nreg = (abi_ == Abi::Arm64) ? 8 : 4;
+  // How many leading arguments are register-passed on this ABI.
+  const int nreg = abi_ == Abi::Arm64    ? 8
+                   : abi_ == Abi::Arm32  ? 4
+                   : abi_ == Abi::X86_64 ? 6
+                                         : 0;  // x86 cdecl: all on the stack
+  // SysV AMD64 requires a 16-byte-aligned stack at the call site. Establish it
+  // BEFORE pushing anything, then keep the pushed block a multiple of 16.
+  if (abi_ == Abi::X86_64) write_reg(Reg::Sp, read_reg(Reg::Sp) & ~uint64_t(15));
   int i = 0;
   std::vector<uint64_t> overflow;
   for (uint64_t a : args) {
@@ -250,8 +346,8 @@ void Engine::set_args(std::initializer_list<uint64_t> args) {
   if (!overflow.empty()) {
     const int psz = pointer_size();
     size_t bytes = overflow.size() * static_cast<size_t>(psz);
-    if (abi_ == Abi::Arm64)
-      bytes = (bytes + 15) & ~size_t(15);  // 16-byte align
+    if (abi_ == Abi::Arm64 || abi_ == Abi::X86_64)
+      bytes = (bytes + 15) & ~size_t(15);  // keep the stack 16-byte aligned
     uint64_t sp = read_reg(Reg::Sp) - bytes;
     uint64_t cur = sp;
     for (uint64_t a : overflow) {
@@ -276,7 +372,7 @@ uint64_t Engine::call(uint64_t fn, std::initializer_list<uint64_t> args,
         "nested Engine::call is unsupported by Unicorn; "
         "use Engine::redirect() for guest callbacks");
   set_args(args);
-  write_reg(Reg::Lr, magic_return);
+  set_return_address(magic_return);
   run(fn, magic_return);
   return read_reg(Reg::Ret0);
 }
@@ -288,7 +384,7 @@ uint64_t Engine::call(uint64_t fn, std::initializer_list<uint64_t> args,
         "nested Engine::call is unsupported by Unicorn; "
         "use Engine::redirect() for guest callbacks");
   set_args(args);
-  write_reg(Reg::Lr, magic_return);
+  set_return_address(magic_return);
   run(fn, magic_return, timeout_us);
   return read_reg(Reg::Ret0);
 }

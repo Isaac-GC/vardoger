@@ -110,6 +110,8 @@ class Engine {
  private:
   int reg_id(Reg r) const;
   void set_args(std::initializer_list<uint64_t> args);
+  // Place the return address per ABI (link register, or pushed on x86).
+  void set_return_address(uint64_t magic_return);
 
   bool wx_ = false;
   std::function<void(uint64_t)> wx_page_cb_;

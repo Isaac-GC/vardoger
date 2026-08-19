@@ -103,7 +103,10 @@ SoInfo ElfLoader::load_impl(const std::vector<uint8_t>& data,
   if (eh.e_type != elf::ET_DYN)
     std::fprintf(stderr, "[loader] %s: warning, e_type=%u (expected ET_DYN)\n",
                  name.c_str(), eh.e_type);
-  const uint16_t want_machine = Is64 ? elf::EM_AARCH64 : elf::EM_ARM;
+  const uint16_t want_machine = engine_.abi() == Abi::Arm64   ? elf::EM_AARCH64
+                               : engine_.abi() == Abi::Arm32  ? elf::EM_ARM
+                               : engine_.abi() == Abi::X86_64 ? elf::EM_X86_64
+                                                              : elf::EM_386;
   if (eh.e_machine != want_machine)
     std::fprintf(stderr, "[loader] %s: warning, e_machine=%u (expected %u)\n",
                  name.c_str(), eh.e_machine, want_machine);
@@ -227,6 +230,24 @@ SoInfo ElfLoader::load_impl(const std::vector<uint8_t>& data,
     return so.load_bias + s.st_value;
   };
 
+  // Relocation type numbers are architecture-specific, so derive them from this
+  // file's e_machine instead of hardcoding ARM. The *shapes* are shared: RELA
+  // targets (arm64/x86_64) write bias+addend / sym / sym+addend, and REL targets
+  // (arm32/i386) fold the addend in from the existing slot contents.
+  struct RelocKinds { uint32_t relative, glob_dat, jump_slot, abs; };
+  const RelocKinds rk =
+      eh.e_machine == elf::EM_AARCH64
+          ? RelocKinds{elf::R_AARCH64_RELATIVE, elf::R_AARCH64_GLOB_DAT,
+                       elf::R_AARCH64_JUMP_SLOT, elf::R_AARCH64_ABS64}
+      : eh.e_machine == elf::EM_X86_64
+          ? RelocKinds{elf::R_X86_64_RELATIVE, elf::R_X86_64_GLOB_DAT,
+                       elf::R_X86_64_JUMP_SLOT, elf::R_X86_64_64}
+      : eh.e_machine == elf::EM_386
+          ? RelocKinds{elf::R_386_RELATIVE, elf::R_386_GLOB_DAT,
+                       elf::R_386_JMP_SLOT, elf::R_386_32}
+          : RelocKinds{elf::R_ARM_RELATIVE, elf::R_ARM_GLOB_DAT,
+                       elf::R_ARM_JUMP_SLOT, elf::R_ARM_ABS32};
+
   // --- apply relocations ---
   auto apply_rela = [&](uint64_t table, uint64_t bytes) {
     for (uint64_t o = 0; o + sizeof(Rela) <= bytes; o += sizeof(Rela)) {
@@ -236,13 +257,12 @@ SoInfo ElfLoader::load_impl(const std::vector<uint8_t>& data,
       const uint32_t sym =
           Is64 ? elf::R64_SYM(r.r_info) : elf::R32_SYM(r.r_info);
       const uint64_t where = so.load_bias + r.r_offset;
-      if (type == elf::R_AARCH64_RELATIVE)
+      if (type == rk.relative)
         engine_.write_t<Addr>(where,
                               static_cast<Addr>(so.load_bias + r.r_addend));
-      else if (type == elf::R_AARCH64_GLOB_DAT ||
-               type == elf::R_AARCH64_JUMP_SLOT)
+      else if (type == rk.glob_dat || type == rk.jump_slot)
         engine_.write_t<Addr>(where, static_cast<Addr>(resolve_sym(sym)));
-      else if (type == elf::R_AARCH64_ABS64)
+      else if (type == rk.abs)
         engine_.write_t<Addr>(where,
                               static_cast<Addr>(resolve_sym(sym) + r.r_addend));
       else
@@ -258,11 +278,11 @@ SoInfo ElfLoader::load_impl(const std::vector<uint8_t>& data,
       const uint32_t sym = elf::R32_SYM(r.r_info);
       const uint64_t where = so.load_bias + r.r_offset;
       const Addr cur = engine_.read_t<Addr>(where);
-      if (type == elf::R_ARM_RELATIVE)
+      if (type == rk.relative)
         engine_.write_t<Addr>(where, static_cast<Addr>(cur + so.load_bias));
-      else if (type == elf::R_ARM_GLOB_DAT || type == elf::R_ARM_JUMP_SLOT)
+      else if (type == rk.glob_dat || type == rk.jump_slot)
         engine_.write_t<Addr>(where, static_cast<Addr>(resolve_sym(sym)));
-      else if (type == elf::R_ARM_ABS32)
+      else if (type == rk.abs)
         engine_.write_t<Addr>(where, static_cast<Addr>(cur + resolve_sym(sym)));
       else
         std::fprintf(stderr, "[loader] %s: unknown REL type %u\n", name.c_str(),
