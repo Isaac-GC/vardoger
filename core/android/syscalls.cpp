@@ -50,6 +50,21 @@ enum class Sys {
   Fcntl,
   Ioctl,
   ClockGetres,
+  // ---- armv7 (EABI) completeness ----
+  // The legacy path-taking variants put the PATH in A0, whereas the *at()
+  // forms put a dirfd in A0 and the path in A1. Mixing them up reads garbage
+  // as the path, so they get their own kinds.
+  OpenLegacy,    // open(path, flags, mode)
+  AccessLegacy,  // access(path, mode)
+  StatPath,      // stat64/lstat64(path, statbuf)
+  Mmap2,         // mmap2: like mmap, but the offset is in 4 KiB PAGES
+  Llseek,        // _llseek(fd, off_hi, off_lo, result*, whence)
+  ArmSetTls,     // ARM_set_tls(tp) -> sets TPIDRURO (bionic thread bring-up)
+  ArmCacheflush, // ARM_cacheflush(start, end, flags) -> 0
+  // ---- shared gaps (both arches) ----
+  Getgid,   // getgid/getegid — same modelled app identity as getuid
+  Writev,   // writev(fd, iovec*, cnt): liblog/stdio use it, not just write
+  Brk,      // brk(addr): classic heap growth; report the current break
 };
 
 Sys normalize(Abi abi, uint64_t nr) {
@@ -144,6 +159,15 @@ Sys normalize(Abi abi, uint64_t nr) {
         return Sys::Ioctl;
       case 114:
         return Sys::ClockGetres;
+      case 176:
+      case 177:
+        return Sys::Getgid;  // getgid / getegid
+      case 66:
+        return Sys::Writev;
+      case 214:
+        return Sys::Brk;
+      case 439:
+        return Sys::Faccessat;  // faccessat2 (extra flags arg, same answer)
       default:
         return Sys::Unknown;
     }
@@ -167,14 +191,18 @@ Sys normalize(Abi abi, uint64_t nr) {
       return Sys::Exit;
     case 248:
       return Sys::ExitGroup;
+    case 90:
+      return Sys::Mmap;  // old_mmap (byte offset)
     case 192:
-      return Sys::Mmap;
+      return Sys::Mmap2;  // mmap2: offset is in PAGES, not bytes
     case 91:
       return Sys::Munmap;
     case 125:
       return Sys::Mprotect;
     case 322:
       return Sys::Openat;
+    case 5:
+      return Sys::OpenLegacy;  // open(path,...): path in A0, not A1
     case 3:
       return Sys::Read;
     case 4:
@@ -182,12 +210,59 @@ Sys normalize(Abi abi, uint64_t nr) {
     case 6:
       return Sys::Close;
     case 19:
-    case 140:
       return Sys::Lseek;
+    case 140:
+      return Sys::Llseek;  // _llseek: 5 args, 64-bit offset via hi/lo + result*
     case 197:
       return Sys::Fstat;  // fstat64
+    case 195:
+    case 196:
+      return Sys::StatPath;  // stat64 / lstat64 (path in A0)
+    case 327:
+      return Sys::Fstatat;  // fstatat64
+    case 33:
+      return Sys::AccessLegacy;  // access(path, mode)
+    case 334:
+      return Sys::Faccessat;
+    case 332:
+      return Sys::Readlinkat;
+    case 162:
+      return Sys::Nanosleep;
+    case 242:
+      return Sys::SchedGetaffinity;
+    case 264:
+      return Sys::ClockGetres;
+    case 403:
+      return Sys::ClockGettime;  // clock_gettime64 (32-bit time_t transition)
+    case 37:
+    case 238:
+    case 268:
+      return Sys::Noop;  // kill / tkill / tgkill
+    case 173:
+    case 174:
+    case 175:
+      return Sys::Noop;  // rt_sigreturn / rt_sigaction / rt_sigprocmask
+    case 338:
+    case 389:
+    case 398:
+      return Sys::Noop;  // set_robust_list / membarrier / rseq
+    case 983042:
+      return Sys::ArmCacheflush;  // 0xf0002
+    case 983045:
+      return Sys::ArmSetTls;  // 0xf0005
     case 384:
       return Sys::Getrandom;
+    case 47:
+    case 50:
+    case 200:
+    case 202:
+      return Sys::Getgid;  // getgid / getegid (+ 32-bit variants)
+    case 146:
+      return Sys::Writev;
+    case 45:
+      return Sys::Brk;
+    case 439:
+      return Sys::Faccessat;  // faccessat2
     case 26:
       return Sys::Ptrace;
     case 240:
@@ -266,6 +341,16 @@ const char* sys_name(Sys s) {
     case Sys::Fcntl: return "fcntl";
     case Sys::Ioctl: return "ioctl";
     case Sys::ClockGetres: return "clock_getres";
+    case Sys::OpenLegacy: return "open";
+    case Sys::AccessLegacy: return "access";
+    case Sys::StatPath: return "stat64";
+    case Sys::Mmap2: return "mmap2";
+    case Sys::Llseek: return "_llseek";
+    case Sys::ArmSetTls: return "ARM_set_tls";
+    case Sys::ArmCacheflush: return "ARM_cacheflush";
+    case Sys::Getgid: return "getgid";
+    case Sys::Writev: return "writev";
+    case Sys::Brk: return "brk";
     case Sys::Noop: return "noop";
     case Sys::Unknown: return "unknown";
   }
@@ -296,6 +381,16 @@ void Syscalls::dispatch(Engine& e) {
 
   const int psz = e.pointer_size();
   auto ret = [&](uint64_t v) { e.write_reg(Reg::Ret0, v); };
+  // Syscall args follow the KERNEL ABI, not the C ABI: arm64 uses x0..x5 and
+  // arm32 uses r0..r5 — all registers. Reg::A4/A5 must NOT be used here, since
+  // under AAPCS32 those are stack slots and Engine::read_reg rejects them.
+  auto sysarg = [&](int i) -> uint64_t {
+    static const int a64[6] = {UC_ARM64_REG_X0, UC_ARM64_REG_X1, UC_ARM64_REG_X2,
+                               UC_ARM64_REG_X3, UC_ARM64_REG_X4, UC_ARM64_REG_X5};
+    static const int a32[6] = {UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2,
+                               UC_ARM_REG_R3, UC_ARM_REG_R4, UC_ARM_REG_R5};
+    return e.read_uc_reg(e.abi() == Abi::Arm64 ? a64[i] : a32[i]);
+  };
   auto wword = [&](uint64_t addr, uint64_t v) {
     if (psz == 8)
       e.write_t<uint64_t>(addr, v);
@@ -345,7 +440,15 @@ void Syscalls::dispatch(Engine& e) {
       break;
     case Sys::Getuid:
     case Sys::Geteuid:
+    case Sys::Getgid:
       ret(10234);
+      break;
+    case Sys::ArmCacheflush:
+      ret(0);
+      break;  // i-cache maintenance is a no-op for us
+    case Sys::ArmSetTls:  // ARM_set_tls(tp): bionic sets the thread pointer
+      e.write_uc_reg(UC_ARM_REG_C13_C0_3, e.read_reg(Reg::A0));  // TPIDRURO
+      ret(0);
       break;
     case Sys::Ptrace:
       ret(0);
@@ -379,11 +482,16 @@ void Syscalls::dispatch(Engine& e) {
       ret(0);
       break;
     }
-    case Sys::Mmap: {  // (addr,len,prot,flags,fd,off)
+    case Sys::Mmap:
+    case Sys::Mmap2: {  // (addr,len,prot,flags,fd,off)
       const uint64_t reqaddr = e.read_reg(Reg::A0);
       const uint64_t len = e.read_reg(Reg::A1), prot = e.read_reg(Reg::A2);
-      const uint64_t flags = e.read_reg(Reg::A3), off = e.read_reg(Reg::A5);
-      const int64_t fd = static_cast<int64_t>(e.read_reg(Reg::A4));
+      const uint64_t flags = e.read_reg(Reg::A3);
+      // mmap2 (armv7) passes the offset in 4 KiB PAGES, not bytes — scaling it
+      // is what makes a file-backed mmap2 read from the right place.
+      const uint64_t off =
+          (s == Sys::Mmap2) ? (sysarg(5) << 12) : sysarg(5);
+      const int64_t fd = static_cast<int64_t>(sysarg(4));
       constexpr uint64_t kMapAnonymous = 0x20, kMapFixed = 0x10;
       if (std::getenv("VARDOGER_MMAP_LOG"))
         std::fprintf(stderr,
@@ -468,6 +576,92 @@ void Syscalls::dispatch(Engine& e) {
       mem_.protect(e.read_reg(Reg::A0), e.read_reg(Reg::A1),
                    static_cast<uint32_t>(e.read_reg(Reg::A2)));
       ret(0);
+      break;
+    }
+    case Sys::OpenLegacy: {  // open(path, flags, mode) — path in A0
+      const std::string path = e.read_cstr(e.read_reg(Reg::A0));
+      const int flags = static_cast<int>(e.read_reg(Reg::A1));
+      const int fd = sys_.vopen(path, flags);
+      if (std::getenv("VARDOGER_OPEN_LOG"))
+        std::fprintf(stderr, "[open] \"%s\" (flags=%#x) -> %s\n", path.c_str(),
+                     flags, fd ? "served" : "ENOENT");
+      ret(fd ? static_cast<uint64_t>(fd) : static_cast<uint64_t>(-2));
+      break;
+    }
+    case Sys::AccessLegacy: {  // access(path, mode) — path in A0
+      const std::string path = e.read_cstr(e.read_reg(Reg::A0));
+      bool ok = sys_.vexists(path);
+      if (!ok) {
+        const int fd = sys_.vopen(path);
+        if (fd) { ok = true; sys_.vclose(fd); }
+      }
+      if (std::getenv("VARDOGER_OPEN_LOG"))
+        std::fprintf(stderr, "[access] \"%s\" -> %s\n", path.c_str(),
+                     ok ? "ok" : "ENOENT");
+      ret(ok ? 0 : static_cast<uint64_t>(-2));
+      break;
+    }
+    case Sys::StatPath: {  // stat64/lstat64(path, statbuf) — path in A0
+      const std::string path = e.read_cstr(e.read_reg(Reg::A0));
+      const int fd = sys_.vopen(path);
+      if (fd) {
+        write_stat64(e, e.read_reg(Reg::A1), sys_.vsize(fd));
+        sys_.vclose(fd);
+        ret(0);
+      } else if (sys_.is_dir(path)) {
+        write_stat64(e, e.read_reg(Reg::A1), kDirSize, kStatDirMode);
+        ret(0);
+      } else {
+        ret(static_cast<uint64_t>(-2));
+      }
+      break;
+    }
+    case Sys::Llseek: {  // (fd, off_hi, off_lo, result*, whence)
+      const int fd = static_cast<int>(e.read_reg(Reg::A0));
+      if (!sys_.is_open(fd)) { ret(static_cast<uint64_t>(-9)); break; }
+      const uint64_t off = (e.read_reg(Reg::A1) << 32) | (e.read_reg(Reg::A2) & 0xffffffffu);
+      const uint64_t resultp = e.read_reg(Reg::A3);
+      const int whence = static_cast<int>(sysarg(4));
+      const size_t cur = sys_.vtell(fd), sz = sys_.vsize(fd);
+      const size_t pos = whence == 1   ? cur + off
+                         : whence == 2 ? sz + off
+                                       : static_cast<size_t>(off);
+      sys_.vseek(fd, pos);
+      if (resultp) e.write_t<uint64_t>(resultp, pos);  // loff_t result
+      ret(0);
+      break;
+    }
+    case Sys::Writev: {  // (fd, iovec*, iovcnt) -> total bytes "written"
+      const int fd = static_cast<int>(e.read_reg(Reg::A0));
+      const uint64_t iov = e.read_reg(Reg::A1);
+      const int cnt = static_cast<int>(e.read_reg(Reg::A2));
+      uint64_t total = 0;
+      for (int i = 0; i < cnt && i < 1024; ++i) {
+        // struct iovec { void* base; size_t len; } — pointer-sized fields
+        const uint64_t base = psz == 8 ? e.read_t<uint64_t>(iov + i * 16)
+                                       : e.read_t<uint32_t>(iov + i * 8);
+        const uint64_t len = psz == 8 ? e.read_t<uint64_t>(iov + i * 16 + 8)
+                                      : e.read_t<uint32_t>(iov + i * 8 + 4);
+        if (!len) continue;
+        std::vector<uint8_t> buf(len);
+        try { e.read(base, buf.data(), len); } catch (...) { break; }
+        if (sys_.is_open(fd)) sys_.vwrite(fd, buf.data(), buf.size());
+        else if (fd == 1 || fd == 2)
+          std::fwrite(buf.data(), 1, buf.size(), fd == 1 ? stdout : stderr);
+        total += len;
+      }
+      ret(total);
+      break;
+    }
+    case Sys::Brk: {  // brk(addr): we don't model a real break; report it
+      // Returning the requested address (or a stable non-zero break for the
+      // query form) keeps bionic's malloc from treating it as a hard failure;
+      // real allocation goes through mmap anyway.
+      const uint64_t want = e.read_reg(Reg::A0);
+      static uint64_t s_brk = 0;
+      if (!s_brk) s_brk = mem_.heap_alloc(0x1000);
+      if (want > s_brk) s_brk = want;
+      ret(s_brk);
       break;
     }
     case Sys::Openat: {  // (dirfd, path, flags, mode)
