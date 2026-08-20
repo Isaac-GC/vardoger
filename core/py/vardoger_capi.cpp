@@ -221,6 +221,17 @@ int mv_load(VM* vm, const char* path) {
     std::string sob((std::istreambuf_iterator<char>(f)),
                     std::istreambuf_iterator<char>());
     vm->sys.add_file(lib_path, sob);
+    // Also serve EVERY loaded .so where a packer that extracts its inner
+    // libraries at runtime would expect to find them: the app's files/ dir.
+    // Ijiami-style loaders check that their own library lives under files/
+    // (not the APK lib dir) and stall when it doesn't. This mirrors whatever
+    // was actually loaded — nothing is invented or served unconditionally.
+    const std::string& pkg = vm->id.package_name;
+    for (const std::string& d :
+         {"/data/data/" + pkg + "/files", "/data/user/0/" + pkg + "/files"}) {
+      vm->sys.add_file(d + "/" + libname, sob);
+      vm->sys.add_dir(d);
+    }
     vm->sos.push_back(std::move(so));
     return static_cast<int>(vm->sos.size() - 1);
   } catch (const std::exception& ex) {
