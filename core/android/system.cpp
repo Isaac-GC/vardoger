@@ -149,12 +149,19 @@ std::optional<std::string> System::synth(const std::string& path) const {
   if (path == "/proc/self/maps") {
     std::string out;
     char line[512];
+    // Anonymous mappings have no backing file: dev 00:00, inode 0. File-backed
+    // ones live on the system/apex dm-verity volume (fe:xx on a real device --
+    // never the fd:03 a naive emulator emits) with plausible large inodes.
     auto emit = [&](uint64_t a, uint64_t b, const char* perms, uint64_t off,
                     int inode, const std::string& nm) {
+      const bool anon = nm.empty() || nm[0] == '[' || nm.rfind("anon:", 0) == 0;
+      const char* dev = anon ? "00:00" : (nm.rfind("/apex", 0) == 0 ? "fe:09" : "fe:00");
+      const unsigned long long ino =
+          anon ? 0ull : 200000ull + static_cast<unsigned long long>(inode) * 37ull;
       std::snprintf(line, sizeof(line),
-                    "%012llx-%012llx %s %08llx fd:03 %-8d %s\n",
+                    "%012llx-%012llx %s %08llx %s %-10llu %s\n",
                     (unsigned long long)a, (unsigned long long)b, perms,
-                    (unsigned long long)off, inode, nm.c_str());
+                    (unsigned long long)off, dev, ino, nm.c_str());
       out += line;
     };
     for (const Memory::Region& r : mem_.regions()) {
@@ -242,6 +249,61 @@ std::optional<std::string> System::synth(const std::string& path) const {
          "/apex/com.android.runtime/bin/linker64");
     emit(0x7b50000000ull, 0x7b50120000ull, "r-xp", 0, 2002,
          "/apex/com.android.runtime/lib64/bionic/libc.so");
+    emit(0x7b50120000ull, 0x7b50134000ull, "r--p", 0x120000, 2002,
+         "/apex/com.android.runtime/lib64/bionic/libc.so");
+    emit(0x7b50134000ull, 0x7b50136000ull, "rw-p", 0x134000, 2002,
+         "/apex/com.android.runtime/lib64/bionic/libc.so");
+    // A real app process maps 20-40 entries; a 2-entry map is itself a tell, and
+    // a watchdog may cross-check these against dl_iterate_phdr/dlopen. Emit the
+    // libraries an ART app process always has, at plausible high addresses.
+    static const struct { const char* path; uint64_t size; } kSysLibs[] = {
+        {"/apex/com.android.runtime/lib64/bionic/libdl.so", 0x4000},
+        {"/apex/com.android.runtime/lib64/bionic/libm.so", 0x2c000},
+        {"/apex/com.android.art/lib64/libart.so", 0x760000},
+        {"/apex/com.android.art/lib64/libartbase.so", 0x88000},
+        {"/apex/com.android.art/lib64/libdexfile.so", 0x9c000},
+        {"/apex/com.android.art/lib64/libprofile.so", 0x30000},
+        {"/apex/com.android.art/lib64/libartpalette.so", 0x8000},
+        {"/apex/com.android.i18n/lib64/libicuuc.so", 0x1a4000},
+        {"/apex/com.android.i18n/lib64/libicui18n.so", 0x1f0000},
+        {"/system/lib64/libc++.so", 0xb4000},
+        {"/system/lib64/liblog.so", 0x18000},
+        {"/system/lib64/libz.so", 0x28000},
+        {"/system/lib64/libutils.so", 0x2c000},
+        {"/system/lib64/libcutils.so", 0x1c000},
+        {"/system/lib64/libbase.so", 0x40000},
+        {"/system/lib64/libbinder.so", 0xf0000},
+        {"/system/lib64/libnativehelper.so", 0x14000},
+        {"/system/lib64/libandroid.so", 0x60000},
+        {"/system/lib64/libandroid_runtime.so", 0x2e0000},
+        {"/system/lib64/libjnigraphics.so", 0xc000},
+        {"/system/lib64/libGLESv2.so", 0x2c000},
+        {"/system/lib64/libEGL.so", 0x48000},
+        {"/system/lib64/libssl.so", 0x74000},
+        {"/system/lib64/libcrypto.so", 0x1f8000},
+        {"/system/lib64/libsqlite.so", 0x120000},
+        {"/system/fonts/Roboto-Regular.ttf", 0x80000},
+    };
+    uint64_t sa = 0x7b60000000ull;
+    int ino = 2100;
+    for (const auto& L : kSysLibs) {
+      const uint64_t text = (L.size * 3 / 4 + 0xfff) & ~uint64_t(0xfff);
+      const char* perms = L.path[strlen(L.path) - 1] == 'f' ? "r--p" : "r-xp";
+      emit(sa, sa + text, perms, 0, ino, L.path);              // text (or font)
+      emit(sa + text, sa + L.size, "r--p", text, ino, L.path);  // rodata
+      emit(sa + L.size, sa + L.size + 0x2000, "rw-p", L.size, ino, L.path);
+      sa += (L.size + 0x12000) & ~uint64_t(0xfff);
+      ++ino;
+    }
+    // The ART heap/JIT regions every app process has.
+    emit(0x12c00000ull, 0x1ac00000ull, "rw-p", 0, 0, "[anon:dalvik-main space]");
+    emit(0x6f80000000ull, 0x6f80200000ull, "rw-p", 0, 0,
+         "[anon:dalvik-/apex/com.android.art/javalib/boot.art]");
+    emit(0x6fa0000000ull, 0x6fa0100000ull, "rw-p", 0, 0,
+         "[anon:dalvik-zygote space]");
+    emit(0x6fb0000000ull, 0x6fb0080000ull, "rw-p", 0, 0,
+         "[anon:dalvik-LinearAlloc]");
+    emit(0x7b30000000ull, 0x7b30020000ull, "rw-p", 0, 0, "[anon:.bss]");
     return out;
   }
   return std::nullopt;  // not a synth path -> let the VFS report ENOENT
