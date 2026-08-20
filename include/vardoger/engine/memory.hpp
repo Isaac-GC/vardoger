@@ -40,7 +40,11 @@ class Memory {
     bool watched = false;  // extractor write-watch flag (set later)
   };
 
-  explicit Memory(Engine& engine) : engine_(engine) {}
+  explicit Memory(Engine& engine)
+      : engine_(engine),
+        // Libraries land where a real device would put them (see
+        // address_space.hpp); 32-bit ABIs keep the low band.
+        lib_next_(kIs64(engine.abi()) ? kLibBase64 : kLibBase) {}
 
   // Map at a specific address (page-aligned out/up). Throws on overlap.
   uint64_t map_fixed(uint64_t addr, size_t len, uint32_t prot, Kind kind,
@@ -86,7 +90,7 @@ class Memory {
 
   Engine& engine_;
   std::vector<Region> regions_;  // sorted by base
-  uint64_t lib_next_ = kLibBase;
+  uint64_t lib_next_;  // set from the ABI in the constructor
   uint64_t mmap_next_ = kMmapBase;
   uint64_t big_next_ = kBigMallocBase;  // dedicated large-malloc region
   uint64_t heap_next_ = 0;              // 0 until the heap is first mapped

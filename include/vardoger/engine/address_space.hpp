@@ -37,6 +37,16 @@ inline constexpr uint64_t kMmapBase = 0x70000000;  // anonymous + file mmap
 inline constexpr uint64_t kStackTop = 0xC0000000;  // stack grows down from here
 inline constexpr uint64_t kStackSize = 0x00800000;  // 8 MiB
 
+// Real arm64 Android maps shared libraries HIGH under ASLR, in
+// 0x70_0000_0000-0x7f_ffff_ffff. kLibBase's compact 0x12000000 is itself an
+// anti-analysis tell: a packer that sanity-checks its own load address via
+// dladdr()/dl_iterate_phdr() reads a low address as tool-injected — and it is
+// INCONSISTENT with the synthetic system libs we report high in
+// /proc/self/maps (linker64/libc at 0x7b...), which is a louder giveaway still.
+// 64-bit ABIs therefore place the library band here; 32-bit ABIs (arm32/x86)
+// must stay under 4 GiB and keep using kLibBase.
+inline constexpr uint64_t kLibBase64 = 0x7000000000ull;
+
 constexpr uint64_t page_align_down(uint64_t a) { return a & ~(kPageSize - 1); }
 constexpr uint64_t page_align_up(uint64_t a) {
   return (a + kPageSize - 1) & ~(kPageSize - 1);
