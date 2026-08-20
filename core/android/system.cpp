@@ -1,6 +1,7 @@
 #include "vardoger/android/system.hpp"
 
 #include <cstdio>
+#include <cstring>  // strlen (libstdc++ does not pull this in transitively)
 
 namespace vardoger {
 
