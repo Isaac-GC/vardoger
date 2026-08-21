@@ -9,7 +9,7 @@
 //
 //
 // This is the reusable substrate the whole ART-coupled packer family needs
-// (classic Jiagu / ijiami / Bangcle / Legu ...). It does NOT reimplement
+// (classic Jiagu / Bangcle / Legu ...). It does NOT reimplement
 // ClassLinker/GC/JIT, only the DEX-load surface.
 #pragma once
 

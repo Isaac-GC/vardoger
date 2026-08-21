@@ -303,11 +303,14 @@ AndroidEnv::AndroidEnv(JavaRuntime& jrt, DeviceIdentity id)
   });
   jrt_.register_method("hashCode", [](JavaRuntime& r, uint64_t self,
                                       const std::vector<DvmValue>&) {
+    // java.lang.String.hashCode — accumulate UNSIGNED: signed int32 overflow is
+    // UB (clang miscompiles it), which corrupts the packer stub's hash-keyed
+    // class/config lookups and stalls the unpack.
     const std::string* s = r.string_of(self);
-    int32_t h = 0;
+    uint32_t h = 0;
     if (s)
-      for (unsigned char c : *s) h = h * 31 + c;
-    return DvmValue::I(h);
+      for (unsigned char c : *s) h = h * 31u + c;
+    return DvmValue::I(int32_t(h));
   });
   jrt_.register_method("toCharArray", [](JavaRuntime& r, uint64_t self,
                                          const std::vector<DvmValue>&) {
@@ -815,10 +818,34 @@ ContextGraph build_context_graph(JavaRuntime& jrt, const DeviceIdentity& id,
       [jctx](JavaRuntime&, uint64_t, const std::vector<DvmValue>&) {
         return DvmValue::O(jctx);
       });
-  jrt.register_method("getStackTrace", [](JavaRuntime& r, uint64_t,
-                                          const std::vector<DvmValue>&) {
-    return DvmValue::O(r.new_object_array({}));
-  });
+  // Thread.getStackTrace / currentThread().getStackTrace(): a realistic Android
+  // app-bind stack. Packers stack-inspect to verify the caller is the
+  // legitimate StubApp<-ActivityThread chain (and that no hook/Xposed frame is
+  // present); an EMPTY stack fails that gate and the decrypt bails. Each element
+  // is a StackTraceElement with a "declaringClass" string; getClassName reads it.
+  jrt.register_method(
+      "getStackTrace", [](JavaRuntime& r, uint64_t, const std::vector<DvmValue>&) {
+        static const char* frames[] = {
+            "dalvik.system.VMStack", "java.lang.Thread",
+            "s.h.e.l.l.N", "s.h.e.l.l.A",
+            "android.app.LoadedApk", "android.app.LoadedApk",
+            "android.app.ActivityThread", "android.app.ActivityThread",
+            "android.app.ActivityThread", "android.os.Handler",
+            "android.os.Looper", "android.app.ActivityThread",
+            "java.lang.reflect.Method", "com.android.internal.os.RuntimeInit",
+            "com.android.internal.os.ZygoteInit"};
+        std::vector<uint64_t> els;
+        for (const char* f : frames) {
+          const uint64_t e = r.new_object("java/lang/StackTraceElement");
+          r.set_field(e, "declaringClass", DvmValue::O(r.new_string_utf(f)));
+          els.push_back(e);
+        }
+        return DvmValue::O(r.new_object_array(std::move(els)));
+      });
+  jrt.register_method(
+      "getClassName", [](JavaRuntime& r, uint64_t self, const std::vector<DvmValue>&) {
+        return r.get_field(self, "declaringClass");  // StackTraceElement.getClassName
+      });
   for (const char* m :
        {"sendEmptyMessageDelayed", "sendEmptyMessage", "sendMessageDelayed",
         "sendMessage", "post", "postDelayed"})

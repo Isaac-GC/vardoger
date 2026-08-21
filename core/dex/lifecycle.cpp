@@ -81,9 +81,13 @@ void register_java_framework(JavaRuntime& jrt) {
       });
   jrt.register_method(
       "hashCode", [str](JavaRuntime& r, uint64_t self, const std::vector<V>&) {
-        int32_t h = 0;
-        for (char c : str(r, self)) h = h * 31 + (unsigned char)c;
-        return V::I(h);
+        // java.lang.String.hashCode: s[0]*31^(n-1)+...+s[n-1], 32-bit wraparound.
+        // MUST accumulate in unsigned — signed int32 overflow is UB and clang
+        // miscompiles it, yielding hashes that don't match the guest's, so the
+        // packer stub's hash-keyed class/config lookups silently fail.
+        uint32_t h = 0;
+        for (char c : str(r, self)) h = h * 31u + (unsigned char)c;
+        return V::I(int32_t(h));
       });
   jrt.register_method(
       "trim", [str](JavaRuntime& r, uint64_t self, const std::vector<V>&) {

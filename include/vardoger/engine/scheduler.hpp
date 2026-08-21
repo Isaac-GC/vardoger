@@ -56,6 +56,22 @@ class Scheduler {
   // results are ready when pthread_create returns), pool workers yield back at
   // their wait.
   void spawn(Engine& e, uint64_t out_ptr, uint64_t routine, uint64_t arg);
+  // Raw clone/fork path: fork the CURRENT thread's whole CPU context into a new
+  // green-thread that resumes at the same (post-SVC) PC but with X0=0 (the
+  // child's syscall return), an optional new stack (child_sp; 0 = share the
+  // parent's, fork/COW-style) and TLS (tls; 0 = inherit). Writes the child tid
+  // to the CLONE_*_SETTID pointers (shared address space) and sets the parent's
+  // return register to the child tid. Returns the child tid, or 0 if it can't
+  // schedule one (scheduler not running, or not arm64) so the caller can fall
+  // back. Used by the clone/clone3/fork/vfork syscalls (see Syscalls::set_clone).
+  uint64_t spawn_clone(Engine& e, uint64_t child_sp, uint64_t tls,
+                       uint64_t flags, uint64_t ptid, uint64_t ctid);
+  // The exit/exit_group syscall from inside a scheduled thread: reap the CURRENT
+  // thread (a raw-clone child terminates this way rather than by returning to
+  // the sentinel) and switch to another runnable thread; the main thread ending
+  // still ends run(). Returns true if it consumed the exit (scheduler active),
+  // false otherwise so the caller stops the VM the old way. status = exit code.
+  bool thread_exit(Engine& e, uint64_t status);
   void do_join(Engine& e, uint64_t tid,
                uint64_t retval_out);  // block until tid exits
   void do_yield(Engine& e);  // sleep/sched_yield: stay runnable, switch

@@ -2,7 +2,7 @@
 //
 // A grab-bag of UC_HOOK_* instrumentation levers driven purely by VARDOGER_* env
 // vars, no packer offsets baked into the hook bodies. Factored out of
-// so every driver (jiagu, ijiami, sdk, ducex,
+// so every driver (jiagu, sdk, ducex,
 // virbox) can arm the same watches/traces with one call.
 //
 // The caller resolves the sample-specific addresses (load bias, RC4 KSA/PRGA

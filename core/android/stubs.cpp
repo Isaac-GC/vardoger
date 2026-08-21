@@ -530,6 +530,28 @@ void Stubs::register_zlib() {
     }
     e.write_reg(Reg::Ret0, static_cast<uint64_t>(static_cast<int64_t>(rc)));
   });
+
+  // crc32(crc, buf, len) / adler32(adler, buf, len): real checksums bridged to
+  // host zlib. Jiagu (and other packers) verify their own .text/DEX integrity
+  // with these; a stubbed 0 return trips the tamper check and aborts the
+  // self-decrypt (the guest calls exit()). Tolerant of a bogus/oversized len.
+  auto checksum = [](Engine& e, uLong (*fn)(uLong, const Bytef*, uInt)) {
+    const uLong init = static_cast<uLong>(e.read_reg(Reg::A0) & 0xffffffff);
+    const uint64_t buf = e.read_reg(Reg::A1);
+    const uInt len = static_cast<uInt>(e.read_reg(Reg::A2));
+    uLong r = fn(init, Z_NULL, 0);  // canonical value for an empty/NULL buffer
+    if (buf && len) {
+      try {
+        std::vector<uint8_t> b(len);
+        e.read(buf, b.data(), len);
+        r = fn(init, b.data(), len);
+      } catch (...) {
+      }
+    }
+    e.write_reg(Reg::Ret0, static_cast<uint64_t>(r & 0xffffffff));
+  };
+  add("crc32", [checksum](Engine& e) { checksum(e, crc32); });
+  add("adler32", [checksum](Engine& e) { checksum(e, adler32); });
 }
 
 void Stubs::register_defaults() {
@@ -1235,7 +1257,7 @@ void Stubs::register_defaults() {
     // libdvm.so DOES NOT EXIST, so dlopen returns NULL. A packer probes
     // dlopen("libdvm.so") to pick its Dalvik-vs-ART code path; a non-null
     // handle makes it wrongly take the Dalvik path (resolve dvm* symbols) and
-    // never install its ART hooks (e.g. Ijiami's ClassLinker::LoadMethod /
+    // never install its ART hooks (e.g. a packer's ClassLinker::LoadMethod /
     // Instrumentation per-method-decrypt). In ART mode (VARDOGER_ART) return NULL
     // so the ART path is taken. VARDOGER_FAKE_DALVIK restores the old handle for
     // the rare (pre-2014) packer that aborts without a Dalvik handle.
@@ -1249,7 +1271,7 @@ void Stubs::register_defaults() {
     }
     // Anti-tamper evasion: packers dlopen() a known hooking/unpacking lib and
     // self-destruct if the handle is NON-null (lib present). Our default
-    // non-null handle false-positives them (e.g. Ijiami's OLLVM self_destruct
+    // non-null handle false-positives them (e.g. an OLLVM self_destruct
     // on dlopen("libsotweak.so")). Return NULL for these so the env looks
     // clean.
     static const char* kTamperLibs[] = {
@@ -2001,7 +2023,7 @@ void Stubs::register_system(System& sys) {
 
   // stat family: return 0 + fill a minimal aarch64 `struct stat` IFF the path
   // exists in the VFS, else -1. A bare "return 0 (exists)" for every stat is
-  // WRONG, Ijiami's N.al gates on stat!=0 for a probe path and, on the false
+  // WRONG, some packers gate on stat!=0 for a probe path and, on the false
   // "exists" answer, walks a C++ vtable path expecting a real stat'd file (null
   // vtable slot -> crash). Faithful existence check keeps the packer on its
   // normal decrypt path. (bionic struct stat: st_mode@0x10, st_size@0x30.)
@@ -2112,6 +2134,26 @@ void Stubs::register_system(System& sys) {
     sys.vclose(static_cast<int>(e.read_reg(Reg::A0)));
     e.write_reg(Reg::Ret0, 0);
   });
+  // popen(command, mode) -> FILE*==fd. Anti-emulation code shells out (getprop,
+  // ps, mount, /proc greps) and scans the output for emulator/root/frida
+  // signatures; a NULL return (the old unimplemented-import default) is itself
+  // read as "can't verify -> tampered" and aborts the unpack (Ducex's dla()
+  // does exactly this). Back it with an EMPTY output stream: the probe succeeds
+  // and finds no bad signatures, so the check passes clean.
+  add("popen", [&sys](Engine& e) {  // (command, mode) -> FILE*==fd
+    const std::string cmd = e.read_cstr(e.read_reg(Reg::A0));
+    static int popen_seq = 0;
+    const std::string p = "/dev/__vdg_popen/" + std::to_string(popen_seq++);
+    sys.add_file(p, "");  // empty command output (no qemu/su/frida markers)
+    const int fd = sys.vopen(p, Vfs::kRdOnly);
+    if (std::getenv("VARDOGER_OPEN_LOG"))
+      std::fprintf(stderr, "[popen] \"%s\" -> fd %d (empty)\n", cmd.c_str(), fd);
+    e.write_reg(Reg::Ret0, static_cast<uint64_t>(fd));
+  });
+  add("pclose", [&sys](Engine& e) {  // (FILE*==fd) -> child exit status (0)
+    sys.vclose(static_cast<int>(e.read_reg(Reg::A0)));
+    e.write_reg(Reg::Ret0, 0);
+  });
   add("feof", [&sys](Engine& e) {  // nonzero once pos >= size
     const int fd = static_cast<int>(e.read_reg(Reg::A0));
     e.write_reg(Reg::Ret0,
@@ -2197,7 +2239,7 @@ void Stubs::register_system(System& sys) {
           "[mmap-libc ENTRY] addr=%#llx len=%#llx flags=%#llx fd=%lld\n",
           (unsigned long long)reqaddr, (unsigned long long)len,
           (unsigned long long)flags, (long long)fd);
-    // MAP_FIXED at a requested address (Ijiami libexec self-decompresses over
+    // MAP_FIXED at a requested address (packer loaders self-decompress over
     // its own base): honour it in place -- map unmapped gaps, reprotect mapped
     // pages, never bump-allocate/throw.
     if (!std::getenv("VARDOGER_NO_MAPFIXED") && (flags & 0x10) && reqaddr) {
@@ -2369,7 +2411,7 @@ void Stubs::register_system(System& sys) {
         if (got) e.write(buf, out.data(), got);
         e.write_reg(Reg::Ret0, got);
       });
-  // NDK AAsset API, backed by the VFS: packers (ijiami) read their encrypted
+  // NDK AAsset API, backed by the VFS: packers read their encrypted
   // payload from assets via these. An AAsset* handle IS the VFS fd;
   // AAssetManager* is a constant token.
   add("AAssetManager_fromJava", [](Engine& e) {

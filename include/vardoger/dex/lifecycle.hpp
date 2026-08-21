@@ -4,7 +4,7 @@
 // (Application.attachBaseContext/onCreate, custom ClassLoader.loadClass) with
 // the mini-Dalvik interpreter so the packer's natives fire IN ORDER via the JNI
 // bridge and its lazy class-load decrypt triggers. GENERIC: works for any stub
-// DEX + RegisterNatives'd packer (classic Jiagu, ijiami, ...); packer specifics
+// DEX + RegisterNatives'd packer (classic Jiagu, ...); packer specifics
 // stay in the driver.
 //
 // on_invoke resolves each DEX method by InvokeKind: super -> declared
@@ -31,7 +31,7 @@ class Scheduler;
 // Register host implementations of the common java.lang / java.io framework
 // methods packer stubs + natives lean on (StringBuilder, String, Boolean,
 // Integer, File, ...). By-name (coarse) but enough for the decrypt lifecycle.
-// Call once after JavaRuntime setup. GENERIC (jiagu / ijiami / ...).
+// Call once after JavaRuntime setup. GENERIC (jiagu / ...).
 void register_java_framework(JavaRuntime& jrt);
 
 class LifecycleRunner {

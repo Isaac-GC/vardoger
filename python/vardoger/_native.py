@@ -153,6 +153,11 @@ mv_is_mapped = _sig("mv_is_mapped", C.c_int, VMP, C.c_uint64)
 mv_regions = _sig("mv_regions", None, VMP, REGION_CB, C.c_void_p)
 
 mv_on_code = _sig("mv_on_code", None, VMP, CODE_CB, C.c_void_p)
+mv_art_register_dex = _sig("mv_art_register_dex", C.c_uint64, VMP, _u8p, C.c_uint64, C.c_char_p)
+mv_run_lifecycle = _sig(
+    "mv_run_lifecycle", C.c_int, VMP, _u8p, C.c_uint64, C.c_char_p,
+    C.c_uint64, C.c_uint64,
+)
 mv_on_unmapped = _sig("mv_on_unmapped", None, VMP, UNMAPPED_CB, C.c_void_p)
 mv_add_mem_write_hook = _sig(
     "mv_add_mem_write_hook",
@@ -169,6 +174,9 @@ mv_alloc_trampoline = _sig(
 
 mv_new_string = _sig("mv_new_string", C.c_uint64, VMP, C.c_char_p)
 mv_new_byte_array = _sig("mv_new_byte_array", C.c_uint64, VMP, _u8p, C.c_int)
+mv_new_object_array = _sig(
+    "mv_new_object_array", C.c_uint64, VMP, _P(C.c_uint64), C.c_int
+)
 mv_find_class = _sig("mv_find_class", C.c_uint64, VMP, C.c_char_p)
 mv_string_of = _sig(
     "mv_string_of", C.c_int, VMP, C.c_uint64, C.c_char_p, C.c_int

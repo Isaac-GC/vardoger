@@ -173,6 +173,44 @@ void ArtRuntime::install() {
               return V::O(d->cookie_arr);
         return V::V();
       });
+  // Build an Element[] (one dalvik/system/DexPathList$Element per registered
+  // DEX) so a loader that installs via makePathElements/makeDexElements gets a
+  // real, non-null array back and proceeds instead of stalling on our stub.
+  auto make_elements = [this](JavaRuntime& r) {
+    std::vector<uint64_t> elems;
+    for (const auto& d : dexes_) {
+      const uint64_t el = r.new_object("dalvik/system/DexPathList$Element");
+      r.set_field(el, "dexFile", V::O(d.dexfile_obj));
+      r.set_field(el, "dex", V::O(d.dexfile_obj));
+      elems.push_back(el);
+    }
+    return V::O(r.new_object_array(std::move(elems)));
+  };
+  // DexPathList.makeInMemoryDexElements(ByteBuffer[] dexFiles, List suppressed)
+  // -> Element[]. THE InMemoryDexClassLoader install path (API 26+): the DEX
+  // ride in as direct ByteBuffers -> capture them, then hand back Element[].
+  jrt_.register_method(
+      "makeInMemoryDexElements",
+      [this, load, make_elements](JavaRuntime& r, uint64_t,
+                                  const std::vector<V>& a) {
+        if (!a.empty()) load(a[0].obj, "makeInMemoryDexElements");
+        return make_elements(r);
+      });
+  // DexPathList.makePathElements(List<File> files, File optDir, List suppressed)
+  // and makeDexElements(..., ClassLoader) -> Element[]. File-based install: the
+  // bytes live behind File paths (captured at the VFS write / openDexFileNative
+  // read), not in these args — so here we just return a valid Element[] so a
+  // loader that keys off a non-null return keeps going.
+  jrt_.register_method(
+      "makePathElements",
+      [make_elements](JavaRuntime& r, uint64_t, const std::vector<V>&) {
+        return make_elements(r);
+      });
+  jrt_.register_method(
+      "makeDexElements",
+      [make_elements](JavaRuntime& r, uint64_t, const std::vector<V>&) {
+        return make_elements(r);
+      });
   // DexFile.defineClassNative(name, loader, cookie, dexFile) -> Class. The DEX
   // is already captured at register time; return a class handle so the packer's
   // loader proceeds to the next class.
@@ -227,10 +265,9 @@ void ArtRuntime::install() {
                         : 0);
       });
   std::fprintf(stderr,
-               "[art] install: "
-               "openInMemoryDexFile/openDexFileNative/defineClassNative/"
-               "getClassNameList "
-               "wired to substrate\n");
+               "[art] install: openInMemoryDexFile/openDexFileNative/"
+               "defineClassNative/getClassNameList + make{InMemoryDex,Path,Dex}"
+               "Elements wired to substrate\n");
 }
 
 uint64_t ArtRuntime::dex_begin(const Dex& d) const {

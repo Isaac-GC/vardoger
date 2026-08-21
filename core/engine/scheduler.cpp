@@ -45,6 +45,12 @@ const int kXReg[31] = {
 
 Scheduler::Scheduler(Engine& engine, Memory& mem) : engine_(engine), mem_(mem) {
   slice_us_ = kSliceTimeoutUs;
+  // VARDOGER_HYBRID=0 defers spawned workers until the creator blocks (join/
+  // sleep), instead of running them eagerly. Needed when a packer spawns
+  // infinite-loop anti-tamper monitor threads that would otherwise starve the
+  // MAIN thread's real work (e.g. a packer's DEX decrypt on the main thread).
+  if (const char* h = std::getenv("VARDOGER_HYBRID"); h && h[0] == '0')
+    hybrid_ = false;
 }
 
 void Scheduler::load_ctx(const Thread& t) {
@@ -273,6 +279,54 @@ void Scheduler::spawn(Engine& e, uint64_t out_ptr, uint64_t routine,
   prefer_ = tid;  // ...but the worker is scheduled next
   stop_ = Stop::Yield;
   e.stop();
+}
+
+uint64_t Scheduler::spawn_clone(Engine& e, uint64_t child_sp, uint64_t tls,
+                                uint64_t /*flags*/, uint64_t ptid,
+                                uint64_t ctid) {
+  // Only meaningful under an active arm64 schedule (the context model is
+  // arm64-only); otherwise report failure so the syscall falls back to -ENOSYS.
+  if (!running_ || e.abi() != Abi::Arm64) return 0;
+  const uint64_t tid = next_tid_++;
+  Thread t{};
+  t.tid = tid;
+  save_ctx(t);      // child inherits the FULL parent context (x1..x30, v, nzcv,
+  t.x[0] = 0;       // tpidr) and the live post-SVC PC, but returns 0 as the child
+  if (child_sp) {   // pthread/clone: run on the caller-provided stack...
+    t.sp = child_sp & ~uint64_t(15);  // (fork, child_sp==0: keep the shared sp)
+    t.x[30] = kFiniPage;  // ...and reap it if the child routine ever returns
+  }
+  if (tls) t.tpidr = tls;             // CLONE_SETTLS
+  t.state = State::Runnable;
+  t.ctx_valid = true;
+  threads_[tid] = t;
+
+  // Shared address space, so the SETTID writes land where the child would put
+  // them. (glibc/bionic pthread reads *ctid to learn its own tid.)
+  if (ptid) e.write_t<uint32_t>(ptid, static_cast<uint32_t>(tid));
+  if (ctid) e.write_t<uint32_t>(ctid, static_cast<uint32_t>(tid));
+
+  e.write_reg(Reg::Ret0, tid);  // parent's clone() returns the child tid
+  if (!hybrid_) return tid;     // deferred: parent runs on; child runs at its
+                                // next block/yield/quantum
+  // Hybrid: let the child run first (its side effects are visible when the
+  // parent's clone() returns), then the parent resumes at the post-SVC PC.
+  threads_.at(cur_).state = State::Runnable;
+  prefer_ = tid;
+  stop_ = Stop::Yield;
+  e.stop();
+  return tid;
+}
+
+bool Scheduler::thread_exit(Engine& e, uint64_t status) {
+  if (!running_) return false;  // no schedule -> caller stops the VM directly
+  // Reuse the "thread returned to the sentinel" reap path: point PC at kFiniPage
+  // and end the slice. The run loop then records X0 as the retval, marks this
+  // thread Finished, wakes its joiners, and (if it was the main thread) returns.
+  e.write_reg(Reg::Ret0, status);  // becomes the thread's retval (join result)
+  e.write_reg(Reg::Pc, kFiniPage);
+  e.stop();
+  return true;
 }
 
 // ---- blocking primitives: set the thread's resume state, then stop the slice

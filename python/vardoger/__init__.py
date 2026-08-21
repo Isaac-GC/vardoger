@@ -170,6 +170,26 @@ class VM:
         arr = (C.c_uint64 * len(args))(*[a & 0xFFFFFFFFFFFFFFFF for a in args])
         return int(_n.mv_call(self._h, fn, arr, len(args)))
 
+    def art_register_dex(self, dex: bytes, location: str = "base.apk") -> int:
+        """Make `dex` resident in guest memory as a real art::DexFile and return the java DexFile
+        handle. For class-load-decrypt packers: pass the full app classes.dex so the packer native can follow the
+        cookie to the trailing encrypted payload. Requires VARDOGER_ART."""
+        buf = (C.c_uint8 * len(dex)).from_buffer_copy(dex)
+        return int(_n.mv_art_register_dex(self._h, buf, len(dex), location.encode()))
+
+    def run_lifecycle(
+        self, dex: bytes, class_desc: str, app: int = 0, ctx: int = 0
+    ) -> None:
+        """Run the packer stub's Java lifecycle (StubApp.attachBaseContext + onCreate) through
+        the Dalvik interpreter, so the stub's OWN bytecode drives the natives in order and its
+        class-load decrypt fires. `dex` is the app's real classes.dex (the stub with the
+        encrypted payload appended); `class_desc` is a DEX descriptor like "Lcom/stub/StubApp;".
+        Decrypted DEX flows to the dex observer (enable VARDOGER_ART). app/ctx default to the
+        built-in context graph. Raises on interpreter error."""
+        buf = (C.c_uint8 * len(dex)).from_buffer_copy(dex)
+        if _n.mv_run_lifecycle(self._h, buf, len(dex), class_desc.encode(), app, ctx) != 0:
+            raise VardogerError(_n.mv_last_error().decode())
+
     # ---- environment ------------------------------------------------------------------------
     def set_property(self, key: str, value: str) -> None:
         _n.mv_set_property(self._h, key.encode(), value.encode())
@@ -215,6 +235,19 @@ class VM:
         """
         data = open(host_path, "rb").read()
         self.vfs_add(guest_path or self.apk_path, data)
+        # Also populate each assets/* entry into the VFS so the NDK AAsset API
+        # (AAssetManager_open -> vopen("assets/<name>")) resolves them — a packer
+        # reads its encrypted payload/config from assets this way. Without this
+        # every AAsset open misses (the APK is served as one opaque file).
+        try:
+            import io
+            import zipfile
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                for n in z.namelist():
+                    if n.startswith("assets/") and not n.endswith("/"):
+                        self.vfs_add(n, z.read(n))
+        except Exception:
+            pass
         return data
 
     def _path(self, fn) -> str:
@@ -398,6 +431,11 @@ class VM:
     def new_byte_array(self, data: bytes) -> int:
         buf = (C.c_uint8 * len(data)).from_buffer_copy(data)
         return int(_n.mv_new_byte_array(self._h, buf, len(data)))
+
+    def new_object_array(self, elems: list[int]) -> int:
+        """Create a Java Object[] from a list of object handles; returns its handle."""
+        buf = (C.c_uint64 * len(elems))(*elems)
+        return int(_n.mv_new_object_array(self._h, buf, len(elems)))
 
     def find_class(self, name: str) -> int:
         return int(_n.mv_find_class(self._h, name.encode()))

@@ -22,6 +22,10 @@
 #include "vardoger/android/syscalls.hpp"
 #include "vardoger/android/system.hpp"
 #include "vardoger/art/art_bringup.hpp"
+#include "vardoger/art/art_runtime.hpp"
+#include "vardoger/dex/dex_file.hpp"
+#include "vardoger/dex/lifecycle.hpp"
+#include "vardoger/extract/debug_hooks.hpp"
 #include "vardoger/elf/elf_loader.hpp"
 #include "vardoger/engine/engine.hpp"
 #include "vardoger/engine/gdb_stub.hpp"
@@ -82,6 +86,7 @@ struct VM {
   System sys;
   Syscalls syscalls;
   ElfLoader loader;
+  ArtRuntime art;  // DEX-load boundary (openInMemoryDexFile/makePathElements/...)
   std::unique_ptr<AndroidEnv> android;
   ContextGraph graph;
   std::vector<SoInfo> sos;
@@ -105,7 +110,8 @@ struct VM {
         jni(e, mem, tramp, jrt),
         sys(mem, id),
         syscalls(e, mem, sys),
-        loader(e, mem) {
+        loader(e, mem),
+        art(e, mem, jrt) {
     sp0 = mem.setup_stack();
     mem.setup_tls();
     stubs.register_defaults();
@@ -126,9 +132,38 @@ struct VM {
     jrt.register_android_hierarchy();
     javavm = jni.build();
     android = std::make_unique<AndroidEnv>(jrt, id);
+    // ART DEX-load boundary. Opt-in (VARDOGER_ART): wires openInMemoryDexFile /
+    // openDexFileNative / defineClassNative / make{InMemoryDex,Path,Dex}Elements
+    // so an ART-coupled packer that installs its decrypted DEX through the
+    // ClassLoader/DexFile surface has that DEX captured (and keeps loading).
+    // Off by default so the byte[]/observer + memscan path is unchanged.
+    if (const char* a = std::getenv("VARDOGER_ART"); a && *a) art.install();
+    // W^X exec-on-fetch: the mmap syscall handler strips exec from W|X mmaps
+    // under VARDOGER_WX (so self-decrypting code faults on first execution);
+    // enabling wx_ lets the engine flip each such page executable on that fetch
+    // fault. Without this the strip is one-way and code mmap'd RWX (e.g. an
+    // aPLib depacker's output ELF) is left non-executable and dead-ends on the
+    // jump into it. Only pages actually executed are flipped, so this is inert
+    // for packers whose code stays in the RWX lib band.
+    if (const char* w = std::getenv("VARDOGER_WX"); w && *w) e.set_wx(true);
+    // Env-driven instrumentation (VARDOGER_ITRACE / PCTRACE / XWATCH / ...) for
+    // reversing obfuscated loaders. No-op unless the matching var is set.
+    install_debug_hooks(e, {});
     graph = build_context_graph(jrt, id);
     stubs.register_system(sys);
     stubs.set_syscalls(syscalls);
+    // Route raw clone/clone3/fork/vfork syscalls into the cooperative scheduler
+    // (a packer that spawns threads via bare clone -- bypassing the
+    // pthread_create stub -- or forks an anti-debug ptrace child then runs both
+    // sides, instead of the syscall failing with -ENOSYS).
+    syscalls.set_clone([this](Engine& en, uint64_t sp, uint64_t tls,
+                              uint64_t flags, uint64_t ptid, uint64_t ctid) {
+      return sched.spawn_clone(en, sp, tls, flags, ptid, ctid);
+    });
+    // exit/exit_group from a scheduled thread reaps that thread (a raw-clone
+    // child ends by calling exit, not by returning to the sentinel).
+    syscalls.set_thread_exit(
+        [this](uint64_t status) { return sched.thread_exit(e, status); });
     // Route packer file-writes (e.g. a decrypted DEX written to a cache path)
     // to the bytes observer, so a Python set_dex_observer / the extractor sees
     // dexes that land in the VFS, not just memory.
@@ -223,7 +258,7 @@ int mv_load(VM* vm, const char* path) {
     vm->sys.add_file(lib_path, sob);
     // Also serve EVERY loaded .so where a packer that extracts its inner
     // libraries at runtime would expect to find them: the app's files/ dir.
-    // Ijiami-style loaders check that their own library lives under files/
+    // Loaders that extract their inner libraries check that their own lives under files/
     // (not the APK lib dir) and stall when it doesn't. This mirrors whatever
     // was actually loaded — nothing is invented or served unconditionally.
     const std::string& pkg = vm->id.package_name;
@@ -489,6 +524,56 @@ void mv_on_code(VM* vm, mv_code_cb cb, void* user) {
     if (vm->code_cb) vm->code_cb(pc, sz);
   });
 }
+// Run the packer stub's Java lifecycle (StubApp.attachBaseContext + onCreate)
+// through the register-based Dalvik interpreter, so the stub's OWN bytecode
+// drives the natives IN ORDER and its class-load decrypt fires — the piece that
+// driving RegisterNatives'd methods blindly can't reproduce. The stub DEX is the
+// app's real classes.dex (the tiny stub with the encrypted payload
+// appended). Decrypted DEX flows out through the ART chain to the dex observer
+// (enable VARDOGER_ART). class_desc is a DEX descriptor, e.g. "Lcom/stub/StubApp;".
+// Returns 0 on success, -1 on error (mv_last_error set).
+int mv_run_lifecycle(VM* vm, const uint8_t* dex, uint64_t n,
+                     const char* class_desc, uint64_t app, uint64_t ctx) {
+  try {
+    // NOTE: do NOT call register_java_framework here — AndroidEnv (built in the
+    // VM ctor) already registers a complete, consistent String/StringBuilder/
+    // File/Context framework. register_java_framework's simpler duplicates use a
+    // different StringBuilder backing field ("__sb" vs "sb") and, registered
+    // last, would clobber AndroidEnv's — breaking the stub's path building.
+    DexFile stub(std::vector<uint8_t>(dex, dex + n));
+    LifecycleRunner lr(stub, vm->jrt, vm->sched, vm->jni.jni_env());
+    if (std::getenv("VARDOGER_LIFECYCLE_TRACE")) lr.trace = true;
+    // Route the stub's ClassLoader.loadClass/findClass/defineClass through the
+    // ART chain -> the packer's defineClassNative -> decrypt + notify_bytes. This
+    // is where the real app DEX is produced (the packer decrypts on class load).
+    lr.art_chain = true;
+    const std::string cls =
+        (class_desc && *class_desc) ? class_desc : lr.entry_class_fallback;
+    lr.run_lifecycle(cls, app ? app : vm->graph.application,
+                     ctx ? ctx : vm->graph.context);
+    return 0;
+  } catch (const std::exception& e) {
+    g_err = e.what();
+    return -1;
+  }
+}
+// Make a DEX resident in GUEST memory as a real art::DexFile (begin_/size_/data_
+// set, mCookie = jlong[]{0, DexFile*}) and return the java DexFile object handle.
+// For class-load-decrypt packers: register the full app classes.dex (real dex structures + the
+// encrypted payload appended after them) so the packer's DexFile-processing
+// native can follow the cookie -> struct -> begin_ and reach the trailing
+// payload to decrypt. Needs VARDOGER_ART. Returns 0 if ART isn't installed.
+uint64_t mv_art_register_dex(VM* vm, const uint8_t* dex, uint64_t n,
+                             const char* location) {
+  try {
+    auto d = vm->art.register_dex(std::vector<uint8_t>(dex, dex + n),
+                                  location && *location ? location : "base.apk");
+    return d.dexfile_obj;
+  } catch (const std::exception& e) {
+    g_err = e.what();
+    return 0;
+  }
+}
 void mv_on_unmapped(VM* vm, mv_unmapped_cb cb, void* user) {
   vm->unmapped_cb = [cb, user](int t, uint64_t addr) -> bool {
     return cb(t, addr, user) != 0;
@@ -543,6 +628,9 @@ uint64_t mv_new_string(VM* vm, const char* s) {
 }
 uint64_t mv_new_byte_array(VM* vm, const uint8_t* data, int n) {
   return vm->jrt.new_byte_array(std::vector<uint8_t>(data, data + n));
+}
+uint64_t mv_new_object_array(VM* vm, const uint64_t* elems, int n) {
+  return vm->jrt.new_object_array(std::vector<uint64_t>(elems, elems + n));
 }
 uint64_t mv_find_class(VM* vm, const char* name) {
   try {

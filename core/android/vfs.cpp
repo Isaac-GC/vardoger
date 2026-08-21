@@ -76,6 +76,24 @@ int Vfs::open(const std::string& path, int flags) {
   return 0;  // not served
 }
 
+int Vfs::dup(int oldfd) {
+  auto it = handles_.find(oldfd);
+  if (it == handles_.end()) return 0;
+  const int fd = next_fd_++;
+  handles_[fd] = it->second;  // copy the handle (own position)
+  return fd;
+}
+
+int Vfs::dup2(int oldfd, int newfd) {
+  auto it = handles_.find(oldfd);
+  if (it == handles_.end()) return -1;
+  if (oldfd == newfd) return newfd;
+  close(newfd);  // dup2 closes an already-open target first (no-op if free)
+  handles_[newfd] = it->second;
+  if (newfd >= next_fd_) next_fd_ = newfd + 1;  // don't hand this number out again
+  return newfd;
+}
+
 size_t Vfs::read(int fd, std::string& out, size_t n) {
   auto it = handles_.find(fd);
   if (it == handles_.end()) return 0;

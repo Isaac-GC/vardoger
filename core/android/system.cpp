@@ -128,7 +128,7 @@ std::optional<std::string> System::synth(const std::string& path) const {
   // /proc/self/wchan + /proc/<tid>/wchan: the kernel wait-channel symbol.
   // Anti-analysis code polls it (looking for "ptrace_stop"/"SyS_ptrace" = a
   // ptraced/stopped process) and can spin-retry if the read FAILS. A missing
-  // file (ENOENT) made Ijiami's N.al loop forever on
+  // file (ENOENT) made one packer's watchdog loop forever on
   // openat("/proc/self/wchan"). Serve a benign on-CPU value ("0") so the read
   // succeeds and looks untraced.
   if (path.rfind("/proc/", 0) == 0 && path.size() > 6 &&

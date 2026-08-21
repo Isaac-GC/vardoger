@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <stdexcept>
 
 namespace vardoger {
@@ -96,6 +97,9 @@ uint64_t Memory::big_alloc(size_t len, uint32_t prot, std::string label) {
 }
 
 uint64_t Memory::map_lib(size_t total, uint32_t prot, std::string label) {
+  // 64-bit libs are placed high (kLibBase64) from the Memory ctor; 32-bit stay
+  // at kLibBase. (Realistic ASLR-range base defeats a packer's dladdr/
+  // dl_iterate_phdr low-address "tool-injected" check.)
   const uint64_t base = lib_next_;
   const uint64_t size = page_align_up(total);
   engine_.map(base, size, prot);

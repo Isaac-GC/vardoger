@@ -303,7 +303,7 @@ void JniBridge::install_env_handlers() {
         "zygisk",
         // FART/ZjDroid/MikRom-family DEX-dumping frameworks, packers
         // FindClass() these and self-destruct if present. Our auto-create would
-        // false-positive them (Ijiami's OLLVM self_destruct probes
+        // false-positive them (OLLVM self_destruct probes
         // youlor/Unpacker, cn/mik/Fartext, mikrom, ...).
         "youlor",
         "Unpacker",

@@ -619,7 +619,7 @@ void Syscalls::dispatch(Engine& e) {
                      (long long)fd, (unsigned long long)off);
       // MAP_FIXED: honour the request at reqaddr in place. The range may span
       // mapped AND unmapped pages (a packer self-mapping a region at its own
-      // base that extends past the loaded span -- Ijiami libexec does exactly
+      // base that extends past the loaded span -- some packer loaders do exactly
       // this) -> map the unmapped gaps, then (re)protect the whole range,
       // instead of bump-allocating over an existing region (which throws
       // UC_ERR_MAP).
@@ -631,7 +631,7 @@ void Syscalls::dispatch(Engine& e) {
             (reqaddr + (len ? len : 1) + 0xfff) & ~uint64_t(0xfff);
         // Map unmapped gaps; reuse (reprotect) already-mapped pages in place.
         // Tolerant: a packer may MAP_FIXED over the very region it's executing
-        // from (Ijiami libexec self-decompress)
+        // from (packer self-decompress)
         // -> never throw; keep existing content, extend the range, and hand
         // back reqaddr.
         for (uint64_t p = lo; p < hi; p += 0x1000) {

@@ -62,6 +62,13 @@ class Vfs {
   const std::set<std::string>& dirs() const { return dirs_; }
 
   int open(const std::string& path, int flags);  // fd >= 3, or 0 if unavailable
+  // Duplicate an open fd onto a fresh number (dup): the new handle shares the
+  // backing path but has its own position. Returns the new fd, or 0 if oldfd
+  // isn't open.
+  int dup(int oldfd);
+  // Duplicate oldfd onto the specific number newfd (dup2/dup3): closes whatever
+  // was at newfd first. Returns newfd, or -1 if oldfd isn't open.
+  int dup2(int oldfd, int newfd);
   bool is_open(int fd) const { return handles_.count(fd) != 0; }
   size_t read(int fd, std::string& out, size_t n);
   size_t write(int fd, const uint8_t* data, size_t n);
