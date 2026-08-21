@@ -7,7 +7,7 @@ build-backend = "scikit_build_core.build"
 # so: pip install vardoger-vm  ->  import vardoger.
 [project]
 name = "vardoger-vm"
-version = "0.4.0"
+version = "0.5.0"
 description = "Drive the vardoger faithful-Android ARM64 runtime from Python."
 readme = "python/vardoger/README.md"
 requires-python = ">=3.10"
