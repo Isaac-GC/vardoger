@@ -23,6 +23,10 @@ inline constexpr uint64_t kJavaSize =
     0x04000000;  // 64 MiB (shadow objects live here)
 inline constexpr uint64_t kHeapBase = 0x40000000;  // malloc/brk arena
 inline constexpr uint64_t kHeapSize = 0x08000000;  // 128 MiB (packers mmap big)
+// When the bump heap fills, it is extended by mmap'ing another arena of this
+// size (see Memory::heap_alloc). Real allocators grow; a hard NULL at a fixed
+// ceiling is an emulator artifact packers can weaponise.
+inline constexpr uint64_t kHeapExtent = 0x04000000;  // 64 MiB per extension
 inline constexpr uint64_t kTlsBase = 0x50000000;   // thread-local storage block
 inline constexpr uint64_t kTlsSize = 0x00010000;   // 64 KiB (bionic TLS grows)
 // Large libc malloc/calloc/realloc requests (>= 4 MiB) get their OWN region

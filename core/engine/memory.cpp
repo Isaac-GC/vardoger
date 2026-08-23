@@ -143,10 +143,31 @@ uint64_t Memory::heap_alloc(size_t len, size_t align) {
     heap_next_ = kHeapBase;
     heap_end_ = kHeapBase + kHeapSize;
   }
-  const uint64_t p =
-      (heap_next_ + (align - 1)) & ~static_cast<uint64_t>(align - 1);
-  if (p + len > heap_end_) {  // never throw from a malloc stub (it runs inside
-    return 0;                 // uc_emu_start), return null like a real OOM.
+  uint64_t p = (heap_next_ + (align - 1)) & ~static_cast<uint64_t>(align - 1);
+  if (p + len > heap_end_) {
+    // GROW instead of failing. A real allocator satisfies a 24-byte request by
+    // mmap'ing a fresh arena; only a fixed-size bump heap can "run out". That
+    // difference is weaponisable: some packers allocate ~800k small
+    // objects in a loop during JNI_OnLoad, and the first NULL makes the loader
+    // null-deref (`str xzr,[x0]`) and abandon its native registration, so the
+    // payload never self-decrypts. Extending keeps us faithful to the device.
+    const size_t want = page_align_up(len > kHeapExtent ? len : kHeapExtent);
+    // mmap_alloc reports failure by THROWING (absurd length, or uc_mem_map
+    // refusing when the address space is exhausted). heap_alloc runs inside a
+    // malloc stub, i.e. inside uc_emu_start, where an exception must not
+    // escape -- so convert it to a null return, which is what a real allocator
+    // does on OOM anyway.
+    uint64_t ext = 0;
+    try {
+      ext = mmap_alloc(want, UC_PROT_READ | UC_PROT_WRITE, "heap-extent");
+    } catch (const std::exception&) {
+      return 0;  // genuinely out of address space: behave like OOM
+    }
+    if (!ext) return 0;
+    heap_next_ = ext;
+    heap_end_ = ext + want;
+    p = (heap_next_ + (align - 1)) & ~static_cast<uint64_t>(align - 1);
+    if (p + len > heap_end_) return 0;
   }
   // Round the consumed footprint up to a size class and add a small inter-chunk
   // gap, so adjacent allocations don't touch (a real allocator's chunk headers

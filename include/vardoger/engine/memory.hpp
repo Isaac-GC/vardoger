@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -44,7 +45,17 @@ class Memory {
       : engine_(engine),
         // Libraries land where a real device would put them (see
         // address_space.hpp); 32-bit ABIs keep the low band.
-        lib_next_(kIs64(engine.abi()) ? kLibBase64 : kLibBase) {}
+        // VARDOGER_LOW_LIB_BASE forces the compact low band even on 64-bit.
+        //
+        // Use it sparingly: a low base is an escape hatch, not a default. Some
+        // in-memory ELF parsers compute
+        //     load_bias = dli_fbase - page_align_down(min PT_LOAD p_vaddr)
+        // and bail when it is zero, because a real process never maps a .so at
+        // address 0 — so a base of 0 is itself the emulator tell. Some
+        // in-memory loaders do exactly this and refuse to self-decrypt.
+        lib_next_((kIs64(engine.abi()) && !std::getenv("VARDOGER_LOW_LIB_BASE"))
+                      ? kLibBase64
+                      : kLibBase) {}
 
   // Map at a specific address (page-aligned out/up). Throws on overlap.
   uint64_t map_fixed(uint64_t addr, size_t len, uint32_t prot, Kind kind,
