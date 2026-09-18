@@ -46,6 +46,10 @@ Engine::Engine(Abi abi) : abi_(abi) {
   // a little more often, which is irrelevant for these short unpacking runs.
   // Must be set before the engine self-initialises on the first map. Tunable via
   // VARDOGER_TCG_BUFFER_MB (0 keeps unicorn's default).
+  // The control only exists in unicorn >= 2.1 (it is a function-like macro over
+  // UC_CTL_TCG_BUFFER_SIZE); distro packages such as Ubuntu 24.04's 2.0.1 lack it,
+  // so fall back to unicorn's default buffer there.
+#ifdef uc_ctl_set_tcg_buffer_size
   {
     uint32_t tcg_mb = 256;
     if (const char* e = std::getenv("VARDOGER_TCG_BUFFER_MB")) tcg_mb = std::strtoul(e, nullptr, 10);
@@ -54,6 +58,7 @@ Engine::Engine(Abi abi) : abi_(abi) {
       uc_ctl_set_tcg_buffer_size(uc_, bytes);  // best-effort; unicorn may adjust
     }
   }
+#endif
   // Select a CPU model that implements FEAT_LSE (large-system atomics:
   // ldadd/swp/cas/..). The default arm64 model lacks it, so LSE atomics -
   // emitted by modern clang for std::atomic/shared_ptr refcounts when the

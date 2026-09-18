@@ -7,7 +7,7 @@ build-backend = "scikit_build_core.build"
 # so: pip install vardoger-vm  ->  import vardoger.
 [project]
 name = "vardoger-vm"
-version = "0.5.1"
+version = "0.5.3"
 description = "Drive the vardoger faithful-Android ARM64 runtime from Python."
 readme = "python/vardoger/README.md"
 requires-python = ">=3.10"
@@ -29,7 +29,7 @@ Source = "https://github.com/Isaac-GC/vardoger"
 # libvardoger_capi.so into the vardoger package, so the ctypes loader finds it beside __init__.py.
 [tool.scikit-build]
 minimum-version = "0.8"
-cmake.version = ">=3.24"
+cmake.version = ">=3.22"
 wheel.packages = ["python/vardoger"]
 
 [tool.scikit-build.cmake.define]

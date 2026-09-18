@@ -27,14 +27,27 @@ of tasks rather than any one target.
 
 ## Build
 
-You need CMake (3.24+), a C++20 compiler, and the development packages for Unicorn, Capstone, and
-zlib.
+You need CMake (3.22+), a C++20 compiler (GCC 11+ or Clang), pkg-config, and the development
+packages for Unicorn (2.0+), Capstone (4.0+), and zlib.
 
 ```bash
-# Debian/Ubuntu:  sudo apt-get install libunicorn-dev libcapstone-dev zlib1g-dev
-# macOS:          brew install unicorn capstone zlib
+# Ubuntu 24.04+ / Debian 12+:
+sudo apt-get install build-essential cmake ninja-build pkg-config libunicorn-dev libcapstone-dev zlib1g-dev
+# macOS:
+brew install cmake ninja pkg-config unicorn capstone zlib
+
 cmake -S . -B build -G Ninja
-cmake --build build            # -> build/libvardoger_capi.so
+cmake --build build            # -> build/libvardoger_capi.so (.dylib on macOS)
+```
+
+Ubuntu 22.04 has no `libunicorn-dev` package. Build Unicorn and Capstone from source with the
+helper script (it installs into `/usr/local`), then point pkg-config at them:
+
+```bash
+sudo apt-get install build-essential cmake ninja-build pkg-config curl libcapstone-dev zlib1g-dev
+sudo bash scripts/install_native_deps.sh
+export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig LD_LIBRARY_PATH=/usr/local/lib
+cmake -S . -B build -G Ninja && cmake --build build
 ```
 
 ## Usage
