@@ -11,6 +11,7 @@
 // the GIL held, which ctypes handles.
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <fstream>
 #include <functional>
 #include <memory>
@@ -92,11 +93,24 @@ struct VM {
   std::vector<SoInfo> sos;
   std::unique_ptr<GdbStub> gdb;  // lazily created by mv_gdb_listen
 
+  // Strategy A (VARDOGER_ART_CLASSLINKER) bring-up results, populated by
+  // mv_map_art when the flag is set; read by the driver to call real DefineClass
+  // and to place the SetCodeItem capture hook. runtime_ptr / art_bias also let
+  // the driver compute absolute libart symbol addresses.
+  uint64_t art_bias = 0, art_size = 0;
+  uint64_t art_runtime = 0, art_thread = 0, art_class_linker = 0;
+  uint64_t art_heap = 0, art_linear_alloc = 0, art_intern_table = 0;
+  uint32_t art_class_linker_off = 0;
+
   // stored Python-side callbacks (kept alive here; hooks/handlers dispatch
   // through them)
   std::function<void(uint64_t, uint32_t)> code_cb;
   std::function<bool(int, uint64_t)> unmapped_cb;
-  std::vector<std::function<void(uint64_t, int, uint64_t)>> write_cbs;
+  // std::deque (not vector): element addresses are stable across push_back, so the &back() pointer
+  // handed to uc_hook_add stays valid when a second hook is registered (a vector realloc would dangle
+  // the first hook's slot -> std::bad_function_call).
+  std::deque<std::function<void(uint64_t, int, uint64_t)>> write_cbs;
+  std::deque<std::function<void(uint64_t, int, uint64_t)>> read_cbs;
 
   VM(Abi a, DeviceIdentity ident)
       : abi(a),
@@ -208,6 +222,14 @@ static void write_thunk(uc_engine*, uc_mem_type, uint64_t addr, int size,
       addr, size, (uint64_t)value);
 }
 
+// mem-read hook thunk: fires BEFORE the read, so `value` is not the loaded
+// value — the address (source operand) is the useful signal.
+static void read_thunk(uc_engine*, uc_mem_type, uint64_t addr, int size,
+                       int64_t value, void* user) {
+  (*reinterpret_cast<std::function<void(uint64_t, int, uint64_t)>*>(user))(
+      addr, size, (uint64_t)value);
+}
+
 extern "C" {
 
 const char* mv_last_error() { return g_err.c_str(); }
@@ -296,18 +318,48 @@ int mv_map_art(VM* vm, const char* dir) {
     vm->e.write(nm, art_guest.data(), art_guest.size() + 1);
     vm->stubs.register_phdr_lib(art->load_bias, art->load_bias + phoff, phnum,
                                 nm);
+    vm->art_bias = art->load_bias;
+    vm->art_size = art->size;
     art_init_locks(vm->e, vm->mem, art->load_bias,
                    base + "/libart.so");     // ART bring-up #1
-    if (std::getenv("VARDOGER_ART_RUNTIME")) {  // ART bring-up #2/#3 (opt-in)
-      art_init_runtime(vm->e, vm->mem, art->load_bias, base + "/libart.so");
-      art_init_thread(vm->e, vm->mem, art->load_bias, base + "/libart.so");
+    // ART bring-up #2/#3 also run when the classlinker path is requested (it
+    // depends on a live Runtime+Thread).
+    const bool want_cl = std::getenv("VARDOGER_ART_CLASSLINKER") != nullptr;
+    if (std::getenv("VARDOGER_ART_RUNTIME") || want_cl) {
+      vm->art_runtime =
+          art_init_runtime(vm->e, vm->mem, art->load_bias, base + "/libart.so");
+      vm->art_thread =
+          art_init_thread(vm->e, vm->mem, art->load_bias, base + "/libart.so");
     }
+    if (want_cl && vm->art_runtime) {  // ART bring-up #4 (Strategy A)
+      ClassLinkerBringup cl = art_init_classlinker(
+          vm->e, vm->mem, art->load_bias, vm->art_runtime, base + "/libart.so");
+      vm->art_class_linker = cl.class_linker;
+      vm->art_heap = cl.heap;
+      vm->art_linear_alloc = cl.linear_alloc;
+      vm->art_intern_table = cl.intern_table;
+      vm->art_class_linker_off = cl.class_linker_off;
+    }
+    // Strategy A3 (VARDOGER_ART_HOOKABLE): make the libart image write-flippable
+    // so a guest inline-hook install on LoadMethod succeeds.
+    if (std::getenv("VARDOGER_ART_HOOKABLE") && art->size)
+      vm->e.set_write_prot_flip(art->load_bias, art->load_bias + art->size);
     return 0;
   } catch (const std::exception& ex) {
     g_err = ex.what();
     return -1;
   }
 }
+// Strategy A accessors: expose the ClassLinker bring-up results to the driver.
+uint64_t mv_art_bias(VM* vm) { return vm->art_bias; }
+uint64_t mv_art_runtime(VM* vm) { return vm->art_runtime; }
+uint64_t mv_art_thread(VM* vm) { return vm->art_thread; }
+uint64_t mv_art_classlinker(VM* vm) { return vm->art_class_linker; }
+uint64_t mv_art_heap(VM* vm) { return vm->art_heap; }
+uint64_t mv_art_linear_alloc(VM* vm) { return vm->art_linear_alloc; }
+uint64_t mv_art_intern_table(VM* vm) { return vm->art_intern_table; }
+uint32_t mv_art_classlinker_off(VM* vm) { return vm->art_class_linker_off; }
+
 static SoInfo* so_at(VM* vm, int i) {
   return (i >= 0 && i < (int)vm->sos.size()) ? &vm->sos[i] : nullptr;
 }
@@ -587,6 +639,16 @@ void mv_add_mem_write_hook(VM* vm, mv_write_cb cb, void* user, uint64_t lo,
   uc_hook h;
   uc_hook_add(vm->e.raw(), &h, UC_HOOK_MEM_WRITE,
               reinterpret_cast<void*>(&write_thunk), slot, lo,
+              hi ? hi : ~uint64_t(0));
+}
+void mv_add_mem_read_hook(VM* vm, mv_write_cb cb, void* user, uint64_t lo,
+                          uint64_t hi) {
+  vm->read_cbs.push_back(
+      [cb, user](uint64_t a, int s, uint64_t v) { cb(a, s, v, user); });
+  auto* slot = &vm->read_cbs.back();
+  uc_hook h;
+  uc_hook_add(vm->e.raw(), &h, UC_HOOK_MEM_READ,
+              reinterpret_cast<void*>(&read_thunk), slot, lo,
               hi ? hi : ~uint64_t(0));
 }
 // Allocate a trampoline whose handler calls a Python cb, implement libc/JNI

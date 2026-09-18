@@ -81,6 +81,15 @@ class Engine {
   void set_wx_page_cb(std::function<void(uint64_t page)> cb) {
     wx_page_cb_ = std::move(cb);
   }
+  // Strategy A3 (VARDOGER_ART_HOOKABLE): when a guest store faults with
+  // UC_ERR_WRITE_PROT inside [lo,hi) (the mapped libart image), flip that whole
+  // region RWX and retry, so a FART packer's mprotect()+patch inline-hook on
+  // ClassLinker::LoadMethod succeeds. Off by default (lo>=hi). Additive.
+  void set_write_prot_flip(uint64_t lo, uint64_t hi) {
+    write_prot_lo_ = lo;
+    write_prot_hi_ = hi;
+    write_prot_flip_ = (lo < hi);
+  }
   // Call a guest function: set args per ABI, LR = magic_return, run until it,
   // return Ret0. Throws if called re-entrantly
   // (from a stub handler), use redirect there instead.
@@ -115,6 +124,8 @@ class Engine {
 
   bool wx_ = false;
   std::function<void(uint64_t)> wx_page_cb_;
+  bool write_prot_flip_ = false;
+  uint64_t write_prot_lo_ = 1, write_prot_hi_ = 0;  // lo>=hi => disabled
 
   static void intr_thunk(uc_engine*, uint32_t intno, void* user);
   // x86_64 `syscall` raises no interrupt; it needs its own instruction hook.

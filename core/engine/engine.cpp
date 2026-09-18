@@ -1,5 +1,7 @@
 #include "vardoger/engine/engine.hpp"
 
+#include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <vector>
@@ -35,6 +37,23 @@ Engine::Engine(Abi abi) : abi_(abi) {
       break;
   }
   check(uc_open(arch, mode, &uc_), "uc_open");
+  // Cap unicorn's TCG code-gen buffer. By default unicorn reserves up to ~1 GiB
+  // of RWX host memory for translated code; under a busy/fragmented host address
+  // space (large APKs served into the VFS, many guest mappings) that allocation
+  // intermittently fails, and unicorn dereferences the resulting null tcg_ctx in
+  // tcg_region_init -> a non-deterministic SIGSEGV during the first uc_mem_map.
+  // A modest buffer allocates reliably; unicorn just flushes translation blocks
+  // a little more often, which is irrelevant for these short unpacking runs.
+  // Must be set before the engine self-initialises on the first map. Tunable via
+  // VARDOGER_TCG_BUFFER_MB (0 keeps unicorn's default).
+  {
+    uint32_t tcg_mb = 256;
+    if (const char* e = std::getenv("VARDOGER_TCG_BUFFER_MB")) tcg_mb = std::strtoul(e, nullptr, 10);
+    if (tcg_mb) {
+      uint32_t bytes = tcg_mb * 1024u * 1024u;
+      uc_ctl_set_tcg_buffer_size(uc_, bytes);  // best-effort; unicorn may adjust
+    }
+  }
   // Select a CPU model that implements FEAT_LSE (large-system atomics:
   // ldadd/swp/cas/..). The default arm64 model lacks it, so LSE atomics -
   // emitted by modern clang for std::atomic/shared_ptr refcounts when the
@@ -295,6 +314,30 @@ void Engine::run(uint64_t start, uint64_t until, uint64_t timeout_us,
       if (wx_page_cb_) wx_page_cb_(page);
       start = pc;  // resume at the fault
       continue;
+    }
+    // Writable-libart (Strategy A3, VARDOGER_ART_HOOKABLE): a FART-style packer
+    // installs its LoadMethod hook by mprotect()+patching libart .text; that
+    // guest store hits UC_ERR_WRITE_PROT on the file-mapped R+X libart region.
+    // Flip the faulting page RWX (stop-fix-restart, same pattern as W^X) so the
+    // inline-hook install succeeds. Gated by write_prot_flip_ so default and
+    // W^X-only runs are untouched. We resume at the faulting PC (not the fault
+    // addr) so the store re-executes against the now-writable page.
+    if (err == UC_ERR_WRITE_PROT && write_prot_flip_ && wx_iters < 2000000) {
+      uint64_t fault_addr = 0;
+      // the faulting DATA address is what unicorn couldn't write; read it back
+      // from the last mem-fault hook if wired, else fall back to a broad flip
+      // guided by write_prot_lo_/hi_ isn't possible per-page here, so we flip
+      // the whole configured libart region once and retry.
+      (void)fault_addr;
+      if (write_prot_lo_ < write_prot_hi_) {
+        const uint64_t lo = write_prot_lo_ & ~uint64_t(0xFFF);
+        const uint64_t hi = (write_prot_hi_ + 0xFFF) & ~uint64_t(0xFFF);
+        uc_mem_protect(uc_, lo, static_cast<size_t>(hi - lo),
+                       UC_PROT_READ | UC_PROT_WRITE | UC_PROT_EXEC);
+        if (wx_page_cb_) wx_page_cb_(lo);
+        start = read_reg(Reg::Pc) & ~uint64_t(1);
+        continue;
+      }
     }
     // A fatal guest fault: give a debugger a chance to report it and let the
     // user inspect (post-mortem) before we unwind by throwing.

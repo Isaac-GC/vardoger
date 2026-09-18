@@ -113,6 +113,14 @@ mv_free = _sig("mv_free", None, VMP)
 
 mv_load = _sig("mv_load", C.c_int, VMP, C.c_char_p)
 mv_map_art = _sig("mv_map_art", C.c_int, VMP, C.c_char_p)
+mv_art_bias = _sig("mv_art_bias", C.c_uint64, VMP)
+mv_art_runtime = _sig("mv_art_runtime", C.c_uint64, VMP)
+mv_art_thread = _sig("mv_art_thread", C.c_uint64, VMP)
+mv_art_classlinker = _sig("mv_art_classlinker", C.c_uint64, VMP)
+mv_art_heap = _sig("mv_art_heap", C.c_uint64, VMP)
+mv_art_linear_alloc = _sig("mv_art_linear_alloc", C.c_uint64, VMP)
+mv_art_intern_table = _sig("mv_art_intern_table", C.c_uint64, VMP)
+mv_art_classlinker_off = _sig("mv_art_classlinker_off", C.c_uint32, VMP)
 mv_so_bias = _sig("mv_so_bias", C.c_uint64, VMP, C.c_int)
 mv_so_size = _sig("mv_so_size", C.c_uint64, VMP, C.c_int)
 mv_so_jni_onload = _sig("mv_so_jni_onload", C.c_uint64, VMP, C.c_int)
@@ -161,6 +169,15 @@ mv_run_lifecycle = _sig(
 mv_on_unmapped = _sig("mv_on_unmapped", None, VMP, UNMAPPED_CB, C.c_void_p)
 mv_add_mem_write_hook = _sig(
     "mv_add_mem_write_hook",
+    None,
+    VMP,
+    WRITE_CB,
+    C.c_void_p,
+    C.c_uint64,
+    C.c_uint64,
+)
+mv_add_mem_read_hook = _sig(
+    "mv_add_mem_read_hook",
     None,
     VMP,
     WRITE_CB,

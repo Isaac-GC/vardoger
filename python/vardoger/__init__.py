@@ -159,6 +159,22 @@ class VM:
         if _n.mv_map_art(self._h, str(art_dir).encode()) != 0:
             raise VardogerError(_n.mv_last_error().decode())
 
+    def art_bringup(self) -> dict:
+        """Return the Strategy-A ART bring-up pointers populated by map_art when
+        VARDOGER_ART_CLASSLINKER is set: {art_bias, runtime, thread, class_linker,
+        heap, linear_alloc, intern_table, class_linker_off}. Zeros if the flag
+        was not set. Read-only view for the DefineClass driver."""
+        return {
+            "art_bias": _n.mv_art_bias(self._h),
+            "runtime": _n.mv_art_runtime(self._h),
+            "thread": _n.mv_art_thread(self._h),
+            "class_linker": _n.mv_art_classlinker(self._h),
+            "heap": _n.mv_art_heap(self._h),
+            "linear_alloc": _n.mv_art_linear_alloc(self._h),
+            "intern_table": _n.mv_art_intern_table(self._h),
+            "class_linker_off": _n.mv_art_classlinker_off(self._h),
+        }
+
     def run_init(self, mod: Module) -> None:
         """Run DT_INIT then every .init_array entry (packer self-decrypt happens here)."""
         _n.mv_run_init(self._h, mod.index)
@@ -377,6 +393,20 @@ class VM:
 
         self._keep.append(cb)
         _n.mv_add_mem_write_hook(self._h, cb, None, lo, hi)
+
+    def add_mem_read_hook(
+        self, fn: Callable[[int, int, int], None], lo: int = 1, hi: int = 0
+    ) -> None:
+        """Call `fn(addr, size, value)` on guest memory reads in [lo, hi] (hi=0 means all).
+        Fires before the load, so `value` is not the loaded value — the read address is the signal
+        (e.g. source-register operands during interpreter decode)."""
+
+        @_n.WRITE_CB
+        def cb(addr, size, value, _u):
+            fn(addr, size, value)
+
+        self._keep.append(cb)
+        _n.mv_add_mem_read_hook(self._h, cb, None, lo, hi)
 
     def alloc_trampoline(
         self, fn: Callable[[], None], name: str = "py_stub"

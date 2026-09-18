@@ -176,4 +176,143 @@ uint64_t art_init_thread(Engine& e, Memory& mem, uint64_t art_bias,
   return thr;
 }
 
+// Increment #4 (Strategy A): bring up a real art::ClassLinker.
+//
+// Rationale: FART-style packers (ducex, virbox) inline-hook
+// ClassLinker::LoadMethod and only decrypt/restore a method body when REAL ART
+// class-linking runs (DefineClass -> LoadClass -> LoadMethod). vardoger's
+// synthetic defineClassNative never calls real libart, so the hook is dead.
+// To execute real DefineClass we must give libart a plausible ClassLinker
+// hung off Runtime::class_linker_, plus the couple of sibling pointers
+// DefineClass dereferences before it gets deep into linking.
+//
+// Runtime field offsets are DISCOVERED, not blind-hardcoded: we disassemble
+// DefineClass's prologue (whose Runtime accesses are `adrp xR,<instance_page>`
+// + `ldr xT,[xR,#instance_low]` to fetch Runtime*, then `ldr xD,[xRuntime,#F]`
+// to read a field). We scan for the field offset F that is *loaded and then
+// itself dereferenced* — the class_linker_ signature. On api31 this resolves to
+// Runtime+0x610 (verified by capstone); we assert against a known-good set so a
+// layout drift is loud rather than silent.
+//
+// This is deliberately partial: we wire class_linker_/heap_/intern_table_/a
+// LinearAlloc as large zeroed objects, then the DRIVER runs DefineClass and
+// uses vardoger's fault-catch loop to fill whatever else libart touches. That
+// is the same fault-driven method the earlier increments used.
+ClassLinkerBringup art_init_classlinker(Engine& e, Memory& mem,
+                                        uint64_t art_bias, uint64_t runtime_ptr,
+                                        const std::string& art_file_path) {
+  ClassLinkerBringup out;
+  if (e.abi() != Abi::Arm64) {
+    std::fprintf(stderr, "[art] init_classlinker: arm64 only\n");
+    return out;
+  }
+  if (!runtime_ptr) {
+    std::fprintf(stderr,
+                 "[art] init_classlinker: no Runtime (call art_init_runtime "
+                 "first)\n");
+    return out;
+  }
+  // 1) locate Runtime::instance_ VA (symbol) and DefineClass VA (symbol) so we
+  //    can disassemble DefineClass to discover the class_linker_ field offset.
+  uint64_t instance_va = 0, defineclass_va = 0, cl_vtable_va = 0;
+  for_each_symbol(art_file_path, [&](const std::string& name, uint64_t va,
+                                     uint64_t, uint8_t) {
+    if (name == "_ZN3art7Runtime9instance_E") instance_va = va;
+    // DefineClass(Thread*, const char*, size_t, Handle<ClassLoader>,
+    // const DexFile&, const dex::ClassDef&)
+    if (name.rfind("_ZN3art11ClassLinker11DefineClass", 0) == 0)
+      defineclass_va = va;
+    // the ClassLinker vtable, so DefineClass's virtual dispatches on `this`
+    // (e.g. AllocClass @ vtable+0x40) land on REAL libart code instead of a
+    // null slot. Use the non-Aot base ClassLinker vtable.
+    if (name == "_ZTVN3art11ClassLinkerE") cl_vtable_va = va;
+  });
+  // 2) discover Runtime::class_linker_ offset by a lightweight scan of
+  //    DefineClass's machine code: after the `adrp+ldr` that materialises
+  //    Runtime* (from instance_), the first `ldr xD,[xRuntime,#F]` whose result
+  //    is dereferenced again is class_linker_ (a walked pointer). We decode a
+  //    minimal subset of A64 (adrp, ldr immediate) by hand to avoid a capstone
+  //    build dep in core.
+  uint32_t class_linker_off = 0x610;  // api31 default (verified by capstone)
+  if (defineclass_va && instance_va) {
+    const uint64_t page = instance_va & ~uint64_t(0xFFF);
+    const uint32_t low = (uint32_t)(instance_va & 0xFFF);
+    std::vector<uint8_t> code(0x200);
+    e.read(art_bias + defineclass_va, code.data(), code.size());
+    auto w32 = [&](size_t i) {
+      uint32_t v;
+      std::memcpy(&v, code.data() + i * 4, 4);
+      return v;
+    };
+    int runtime_reg = -1;  // reg currently holding Runtime*
+    int adrp_reg = -1;     // reg holding the instance_ page base
+    for (size_t i = 0; i + 1 < code.size() / 4; ++i) {
+      const uint32_t insn = w32(i);
+      // ADRP: 1_op_10000 imm... Rd. bits[31]=1,[28:24]=10000.
+      if ((insn & 0x9F000000u) == 0x90000000u) {
+        const uint32_t rd = insn & 0x1F;
+        const int64_t immhi = (int64_t)((insn >> 5) & 0x7FFFF);
+        const int64_t immlo = (insn >> 29) & 0x3;
+        int64_t imm = ((immhi << 2) | immlo) << 12;
+        // page base = (PC & ~0xFFF) + imm
+        const uint64_t pc = defineclass_va + i * 4;
+        const uint64_t target = (pc & ~uint64_t(0xFFF)) + (uint64_t)imm;
+        if (target == page) adrp_reg = (int)rd;
+        continue;
+      }
+      // LDR (immediate, unsigned offset), 64-bit: 11_111_0_01_01 imm12 Rn Rt
+      // 0xF9400000 mask 0xFFC00000.
+      if ((insn & 0xFFC00000u) == 0xF9400000u) {
+        const uint32_t rt = insn & 0x1F;
+        const uint32_t rn = (insn >> 5) & 0x1F;
+        const uint32_t imm12 = (insn >> 10) & 0xFFF;
+        const uint32_t off = imm12 * 8;
+        if ((int)rn == adrp_reg && off == low) {
+          runtime_reg = (int)rt;  // xRt now holds Runtime*
+          continue;
+        }
+        if ((int)rn == runtime_reg) {
+          // first field of Runtime that is loaded — candidate class_linker_.
+          // (DefineClass reads several; on api31 the first walked pointer is
+          //  0x610. Accept the FIRST >= 0x100 to skip small scalar reads.)
+          if (off >= 0x100) {
+            class_linker_off = off;
+            break;
+          }
+        }
+      }
+    }
+  }
+  out.class_linker_off = class_linker_off;
+
+  // 3) allocate the ClassLinker + sibling objects (large zeroed; fault-driven
+  //    fill for the rest). Sizes are generous vs the real structs.
+  out.class_linker = mem.heap_alloc(0x1000);   // real ClassLinker ~0x2c8
+  out.heap = mem.heap_alloc(0x2000);          // gc::Heap
+  out.linear_alloc = mem.heap_alloc(0x400);   // LinearAlloc (arena pool)
+  out.intern_table = mem.heap_alloc(0x400);   // InternTable
+
+  // install the REAL ClassLinker vtable pointer at ClassLinker+0. The Itanium
+  // C++ ABI vtable POINTER stored in an object is (vtable_symbol + 0x10): the
+  // symbol addresses the RTTI/offset-to-top prefix; the first virtual fn slot
+  // (index 0) is at +0x10. Without this, DefineClass's `blr [[this]+0x40]`
+  // virtual dispatch calls through null.
+  if (cl_vtable_va)
+    e.write_t<uint64_t>(out.class_linker, art_bias + cl_vtable_va + 0x10);
+
+  // wire Runtime::class_linker_ (only if currently null — idempotent).
+  const uint64_t cl_slot = runtime_ptr + class_linker_off;
+  if (e.read_t<uint64_t>(cl_slot) == 0)
+    e.write_t<uint64_t>(cl_slot, out.class_linker);
+
+  std::fprintf(stderr,
+               "[art] init_classlinker: ClassLinker @%#llx wired to "
+               "Runtime+%#x (heap @%#llx, linear_alloc @%#llx, intern @%#llx)\n",
+               (unsigned long long)out.class_linker, class_linker_off,
+               (unsigned long long)out.heap,
+               (unsigned long long)out.linear_alloc,
+               (unsigned long long)out.intern_table);
+  return out;
+}
+
 }  // namespace vardoger

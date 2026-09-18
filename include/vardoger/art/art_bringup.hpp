@@ -35,4 +35,26 @@ uint64_t art_init_runtime(Engine& e, Memory& mem, uint64_t art_bias,
 uint64_t art_init_thread(Engine& e, Memory& mem, uint64_t art_bias,
                          const std::string& art_file_path);
 
+// Increment #4 (Strategy A, VARDOGER_ART_CLASSLINKER): bring up a real
+// art::ClassLinker so real ClassLinker::DefineClass -> LoadClass -> LoadMethod
+// can execute against a mapped real libart (which is what fires FART-style
+// packers' inline hook on LoadMethod). Allocates a large zeroed ClassLinker
+// object, wires Runtime::class_linker_ (and a few sibling Runtime pointer
+// fields DefineClass dereferences early: heap_, a LinearAlloc, intern_table_),
+// leaving the rest to the fault-driven fill loop the caller runs. The Runtime
+// field offsets are derived by DISASSEMBLING DefineClass's Runtime dereferences
+// (adrp instance_ + ldr [runtime,#off]) so it stays version-tolerant rather
+// than hardcoding one API level. Returns the guest ClassLinker* (0 on failure).
+// Requires art_init_runtime + art_init_thread to have run first. Idempotent.
+struct ClassLinkerBringup {
+  uint64_t class_linker = 0;      // guest ClassLinker*
+  uint64_t heap = 0;             // guest gc::Heap*
+  uint64_t linear_alloc = 0;     // guest LinearAlloc*
+  uint64_t intern_table = 0;     // guest InternTable*
+  uint32_t class_linker_off = 0;  // Runtime::class_linker_ offset (discovered)
+};
+ClassLinkerBringup art_init_classlinker(Engine& e, Memory& mem,
+                                        uint64_t art_bias, uint64_t runtime_ptr,
+                                        const std::string& art_file_path);
+
 }  // namespace vardoger

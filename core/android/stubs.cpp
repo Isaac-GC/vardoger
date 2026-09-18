@@ -12,6 +12,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "vardoger/android/syscalls.hpp"
@@ -2476,8 +2477,33 @@ void Stubs::register_system(System& sys) {
     sys.vseek(fd, pos);
     e.write_reg(Reg::Ret0, pos);
   });
+  // Buffer cache: materialise full asset content into guest heap on first
+  // AAsset_getBuffer call, keyed by VFS fd.  Cleared on AAsset_close so the
+  // guest heap slot is not leaked across repeated open/close cycles.
+  static std::unordered_map<int, uint64_t> g_aasset_buf;
+  add("AAsset_isAllocated", [&sys](Engine& e) {
+    const int fd = static_cast<int>(e.read_reg(Reg::A0));
+    e.write_reg(Reg::Ret0, sys.is_open(fd) ? 1u : 0u);
+  });
+  add("AAsset_getBuffer", [this, &sys](Engine& e) {
+    const int fd = static_cast<int>(e.read_reg(Reg::A0));
+    if (!sys.is_open(fd)) { e.write_reg(Reg::Ret0, 0); return; }
+    auto it = g_aasset_buf.find(fd);
+    if (it != g_aasset_buf.end()) { e.write_reg(Reg::Ret0, it->second); return; }
+    const size_t sz = sys.vsize(fd);
+    std::string content;
+    sys.vseek(fd, 0);
+    sys.vread(fd, content, sz);
+    sys.vseek(fd, 0);
+    const uint64_t ptr = mem_.heap_alloc(sz ? sz : 1);
+    if (sz) e.write(ptr, content.data(), sz);
+    g_aasset_buf[fd] = ptr;
+    e.write_reg(Reg::Ret0, ptr);
+  });
   add("AAsset_close", [&sys](Engine& e) {
-    sys.vclose(static_cast<int>(e.read_reg(Reg::A0)));
+    const int fd = static_cast<int>(e.read_reg(Reg::A0));
+    sys.vclose(fd);
+    g_aasset_buf.erase(fd);
     e.write_reg(Reg::Ret0, 0);
   });
   add("__system_property_read", [](Engine& e) { e.write_reg(Reg::Ret0, 0); });

@@ -42,7 +42,17 @@ inline constexpr int64_t DT_NULL = 0, DT_NEEDED = 1, DT_PLTRELSZ = 2,
                          DT_FINI_ARRAY = 26, DT_INIT_ARRAYSZ = 27,
                          DT_FINI_ARRAYSZ = 28, DT_FLAGS = 30,
                          DT_PREINIT_ARRAY = 32, DT_PREINIT_ARRAYSZ = 33,
-                         DT_GNU_HASH = 0x6ffffef5, DT_FLAGS_1 = 0x6ffffffb;
+                         DT_GNU_HASH = 0x6ffffef5, DT_FLAGS_1 = 0x6ffffffb,
+                         // RELR compressed relative relocations (Android/glibc).
+                         DT_RELR = 0x24, DT_RELRSZ = 0x23, DT_RELRENT = 0x25,
+                         // Android packed RELA (used by libart & most system
+                         // libs; DT_RELA is absent, these carry the relocs).
+                         // Per the Android ELF spec: REL=0x6000000f,
+                         // RELSZ=0x60000010, RELA=0x60000011, RELASZ=0x60000012.
+                         DT_ANDROID_REL = 0x6000000f,
+                         DT_ANDROID_RELSZ = 0x60000010,
+                         DT_ANDROID_RELA = 0x60000011,
+                         DT_ANDROID_RELASZ = 0x60000012;
 
 // ---- symbol table ----
 inline constexpr uint16_t SHN_UNDEF = 0;

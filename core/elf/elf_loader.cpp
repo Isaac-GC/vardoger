@@ -148,6 +148,8 @@ SoInfo ElfLoader::load_impl(const std::vector<uint8_t>& data,
   uint64_t strtab = 0, symtab = 0, rela = 0, relasz = 0, jmprel = 0,
            pltrelsz = 0;
   uint64_t rel = 0, relsz = 0;
+  uint64_t relr = 0, relrsz = 0;                  // RELR compressed relatives
+  uint64_t android_rela = 0, android_relasz = 0;  // Android packed RELA
   int64_t pltrel = 0;
   uint64_t init_array = 0, init_arraysz = 0;
   uint64_t preinit_array = 0, preinit_arraysz = 0;
@@ -216,6 +218,18 @@ SoInfo ElfLoader::load_impl(const std::vector<uint8_t>& data,
           break;
         case elf::DT_GNU_HASH:
           gnu_hash = so.load_bias + d.d_val;
+          break;
+        case elf::DT_RELR:
+          relr = so.load_bias + d.d_val;
+          break;
+        case elf::DT_RELRSZ:
+          relrsz = d.d_val;
+          break;
+        case elf::DT_ANDROID_RELA:
+          android_rela = so.load_bias + d.d_val;
+          break;
+        case elf::DT_ANDROID_RELASZ:
+          android_relasz = d.d_val;
           break;
         case elf::DT_NEEDED:
           needed_offsets.push_back(d.d_val);
@@ -308,8 +322,107 @@ SoInfo ElfLoader::load_impl(const std::vector<uint8_t>& data,
     }
   };
 
+  // RELR: compressed R_*_RELATIVE stream. An even entry (bit0==0) is an
+  // address; the slot there is biased. Following odd entries (bit0==1) are
+  // bitmaps: bit i (i>=1) biases the slot at addr + i*wordsize; after a bitmap,
+  // addr advances by 63*wordsize. Applies only to 64-bit here (arm64/x86_64).
+  auto apply_relr = [&](uint64_t table, uint64_t bytes) {
+    const uint64_t wsz = sizeof(Addr);
+    uint64_t where = 0;
+    for (uint64_t o = 0; o + sizeof(Addr) <= bytes; o += sizeof(Addr)) {
+      const uint64_t entry = engine_.read_t<Addr>(table + o);
+      if ((entry & 1) == 0) {
+        where = so.load_bias + entry;
+        engine_.write_t<Addr>(
+            where, static_cast<Addr>(engine_.read_t<Addr>(where) + so.load_bias));
+        where += wsz;
+      } else {
+        uint64_t bits = entry >> 1;
+        for (uint64_t i = 0; bits; ++i, bits >>= 1) {
+          if (bits & 1) {
+            const uint64_t w = where + i * wsz;
+            engine_.write_t<Addr>(
+                w, static_cast<Addr>(engine_.read_t<Addr>(w) + so.load_bias));
+          }
+        }
+        where += 63 * wsz;
+      }
+    }
+  };
+  // Android packed RELA ("APS2"): magic 'A','P','S','2' then a SLEB128 stream of
+  // grouped relocations. Decodes to a flat list of {r_offset, r_info, r_addend}
+  // which we feed through the same RELA handling.
+  auto apply_android_rela = [&](uint64_t table, uint64_t bytes) {
+    std::vector<uint8_t> buf(bytes);
+    engine_.read(table, buf.data(), bytes);
+    size_t p = 0;
+    if (bytes < 4 || buf[0] != 'A' || buf[1] != 'P' || buf[2] != 'S' ||
+        buf[3] != '2') {
+      std::fprintf(stderr,
+                   "[loader] %s: bad ANDROID_RELA magic (table=%#llx bytes=%llu "
+                   "got=%02x%02x%02x%02x)\n",
+                   name.c_str(), (unsigned long long)table,
+                   (unsigned long long)bytes, bytes > 0 ? buf[0] : 0,
+                   bytes > 1 ? buf[1] : 0, bytes > 2 ? buf[2] : 0,
+                   bytes > 3 ? buf[3] : 0);
+      return;
+    }
+    p = 4;
+    auto sleb = [&]() -> int64_t {
+      int64_t result = 0;
+      int shift = 0;
+      uint8_t b;
+      do {
+        b = buf[p++];
+        result |= (int64_t)(b & 0x7f) << shift;
+        shift += 7;
+      } while (b & 0x80);
+      if (shift < 64 && (b & 0x40)) result |= -((int64_t)1 << shift);
+      return result;
+    };
+    int64_t reloc_count = sleb();
+    int64_t reloc_offset = sleb();
+    int64_t addend = 0;
+    const int64_t GROUPED_BY_INFO = 1, GROUPED_BY_DELTA = 2,
+                  GROUPED_BY_ADDEND = 4, GROUP_HAS_ADDEND = 8;
+    int64_t done = 0;
+    while (done < reloc_count && p < bytes) {
+      int64_t group_size = sleb();
+      int64_t group_flags = sleb();
+      int64_t group_delta = 0;
+      if (group_flags & GROUPED_BY_DELTA) group_delta = sleb();
+      int64_t group_info = 0;
+      if (group_flags & GROUPED_BY_INFO) group_info = sleb();
+      const bool has_addend = group_flags & GROUP_HAS_ADDEND;
+      if ((group_flags & GROUPED_BY_ADDEND) && has_addend) addend += sleb();
+      for (int64_t i = 0; i < group_size; ++i) {
+        reloc_offset += (group_flags & GROUPED_BY_DELTA) ? group_delta : sleb();
+        const int64_t info = (group_flags & GROUPED_BY_INFO) ? group_info : sleb();
+        if (has_addend && !(group_flags & GROUPED_BY_ADDEND)) addend += sleb();
+        const int64_t this_addend = has_addend ? addend : 0;
+        // apply like a single RELA entry
+        const uint32_t type =
+            Is64 ? elf::R64_TYPE(info) : elf::R32_TYPE(info);
+        const uint32_t symi = Is64 ? elf::R64_SYM(info) : elf::R32_SYM(info);
+        const uint64_t where = so.load_bias + reloc_offset;
+        if (type == rk.relative)
+          engine_.write_t<Addr>(
+              where, static_cast<Addr>(so.load_bias + this_addend));
+        else if (type == rk.glob_dat || type == rk.jump_slot)
+          engine_.write_t<Addr>(where, static_cast<Addr>(resolve_sym(symi)));
+        else if (type == rk.abs)
+          engine_.write_t<Addr>(
+              where, static_cast<Addr>(resolve_sym(symi) + this_addend));
+      }
+      done += group_size;
+      if (!has_addend) addend = 0;
+    }
+  };
+
   if constexpr (Is64) {
     if (rela) apply_rela(rela, relasz);
+    if (android_rela) apply_android_rela(android_rela, android_relasz);
+    if (relr) apply_relr(relr, relrsz);
     if (jmprel) apply_rela(jmprel, pltrelsz);  // arm64 PLT relocs are RELA
   } else {
     if (rel) apply_rel(rel, relsz);
