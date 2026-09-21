@@ -1,0 +1,78 @@
+site_name: vardoger
+site_description: Drive the vardoger faithful-Android ARM64 runtime from Python.
+site_author: Isaac
+docs_dir: docs/reference
+
+theme:
+  name: material
+  palette:
+    - scheme: slate
+      primary: deep purple
+      accent: purple
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+    - scheme: default
+      primary: deep purple
+      accent: purple
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+  font:
+    text: Inter
+    code: JetBrains Mono
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - toc:
+      permalink: true
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Installation: installation.md
+  - Quick Start: quickstart.md
+  - Python API:
+    - Overview: api/index.md
+    - VM: api/vm.md
+    - Hooks & Trampolines: api/hooks.md
+    - Java Surface: api/java.md
+    - Capture: api/capture.md
+    - Observers: api/observers.md
+    - Debugging (GDB): api/gdb.md
+    - Data Types: api/types.md
+  - Environment Variables:
+    - Overview: env/index.md
+    - Scheduler & Execution: env/scheduler.md
+    - Memory & Mapping: env/memory.md
+    - ART / DEX Runtime: env/art.md
+    - Anti-Tamper Evasion: env/evasion.md
+    - System Environment: env/system.md
+    - Dalvik & JNI: env/dalvik.md
+    - Tracing & Instrumentation: env/tracing.md
+    - Crypto Extraction: env/crypto.md
+    - I/O Logging: env/io.md
+    - Miscellaneous: env/misc.md
+  - CLI Tools:
+    - unpack_any: cli/unpack_any.md
+    - virbox_recover: cli/virbox_recover.md
+    - Script Index: cli/index.md

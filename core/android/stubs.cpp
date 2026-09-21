@@ -4,6 +4,7 @@
 #include <zlib.h>
 
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -371,12 +372,77 @@ void Stubs::register_pthreads() {
     });
   // Benign no-ops (no contention to model on a single host thread).
   for (const char* n :
+       // mutexes
        {"pthread_mutex_trylock", "pthread_mutex_init", "pthread_mutex_destroy",
-        "pthread_cond_init", "pthread_cond_destroy", "pthread_rwlock_rdlock",
-        "pthread_rwlock_wrlock", "pthread_rwlock_unlock", "pthread_attr_init",
-        "pthread_attr_destroy", "pthread_attr_setdetachstate",
-        "pthread_attr_setstacksize"})
+        // condvars
+        "pthread_cond_init", "pthread_cond_destroy",
+        "pthread_cond_timedwait",
+        // rwlocks (full API)
+        "pthread_rwlock_init",        "pthread_rwlock_destroy",
+        "pthread_rwlock_rdlock",      "pthread_rwlock_wrlock",
+        "pthread_rwlock_unlock",      "pthread_rwlock_tryrdlock",
+        "pthread_rwlock_trywrlock",   "pthread_rwlock_timedrdlock",
+        "pthread_rwlock_timedwrlock",
+        "pthread_rwlockattr_init",    "pthread_rwlockattr_destroy",
+        "pthread_rwlockattr_setpshared", "pthread_rwlockattr_getpshared",
+        // attr setters
+        "pthread_attr_init",          "pthread_attr_destroy",
+        "pthread_attr_setdetachstate","pthread_attr_setstacksize",
+        "pthread_attr_setschedpolicy","pthread_attr_setschedparam",
+        "pthread_attr_setguardsize",  "pthread_attr_setinheritsched",
+        "pthread_attr_setstack",      "pthread_attr_setaffinity_np",
+        // barrier
+        "pthread_barrier_init",       "pthread_barrier_destroy",
+        "pthread_barrier_wait",
+        "pthread_barrierattr_init",   "pthread_barrierattr_destroy",
+        "pthread_barrierattr_setpshared",
+        // spinlocks
+        "pthread_spin_init",   "pthread_spin_lock",
+        "pthread_spin_trylock","pthread_spin_unlock",
+        "pthread_spin_destroy",
+        // misc
+        "pthread_sigmask", "pthread_setname_np", "pthread_getname_np",
+        "pthread_setaffinity_np", "pthread_getaffinity_np",
+        "pthread_equal"})
     add(n, [](Engine& e) { e.write_reg(Reg::Ret0, 0); });
+
+  // attr getters that need to write back a value
+  add("pthread_attr_getstacksize", [](Engine& e) {  // (attr, size*) -> 0
+    const uint64_t out = e.read_reg(Reg::A1);
+    if (out) e.write_t<uint64_t>(out, 0x100000);  // 1 MiB
+    e.write_reg(Reg::Ret0, 0);
+  });
+  add("pthread_attr_getdetachstate", [](Engine& e) {  // (attr, state*) -> 0
+    const uint64_t out = e.read_reg(Reg::A1);
+    if (out) e.write_t<int32_t>(out, 0);  // PTHREAD_CREATE_JOINABLE
+    e.write_reg(Reg::Ret0, 0);
+  });
+  add("pthread_attr_getschedpolicy", [](Engine& e) {  // (attr, policy*) -> 0
+    const uint64_t out = e.read_reg(Reg::A1);
+    if (out) e.write_t<int32_t>(out, 0);  // SCHED_OTHER
+    e.write_reg(Reg::Ret0, 0);
+  });
+  add("pthread_attr_getschedparam", [](Engine& e) {  // (attr, param*) -> 0
+    const uint64_t out = e.read_reg(Reg::A1);
+    if (out) e.write_t<int32_t>(out, 0);  // sched_priority = 0
+    e.write_reg(Reg::Ret0, 0);
+  });
+  add("pthread_attr_getguardsize", [](Engine& e) {  // (attr, size*) -> 0
+    const uint64_t out = e.read_reg(Reg::A1);
+    if (out) e.write_t<uint64_t>(out, 4096);
+    e.write_reg(Reg::Ret0, 0);
+  });
+  add("pthread_attr_getstack", [](Engine& e) {  // (attr, addr*, size*) -> 0
+    const uint64_t ap = e.read_reg(Reg::A1), sp = e.read_reg(Reg::A2);
+    if (ap) e.write_t<uint64_t>(ap, 0);
+    if (sp) e.write_t<uint64_t>(sp, 0x100000);
+    e.write_reg(Reg::Ret0, 0);
+  });
+  add("pthread_attr_getinheritsched", [](Engine& e) {  // (attr, inherit*) -> 0
+    const uint64_t out = e.read_reg(Reg::A1);
+    if (out) e.write_t<int32_t>(out, 1);  // PTHREAD_INHERIT_SCHED
+    e.write_reg(Reg::Ret0, 0);
+  });
 }
 
 // Guest-facing zlib inflate, bridged to host zlib. Packers commonly zlib/gzip
@@ -795,7 +861,10 @@ void Stubs::register_defaults() {
     e.write_reg(Reg::Ret0, dst);
   });
   for (const char* n :
-       {"sigaction", "sigemptyset", "sigaltstack", "sigaddset", "sigprocmask"})
+       {"sigaction",    "sigemptyset",    "sigfillset",    "sigaltstack",
+        "sigaddset",    "sigdelset",      "sigismember",   "sigprocmask",
+        "sigaction64",  "sigemptyset64",  "sigfillset64",  "sigaddset64",
+        "sigdelset64",  "sigismember64",  "sigprocmask64"})
     add(n, [](Engine& e) {
       e.write_reg(Reg::Ret0, 0);
     });  // signal setup -> success no-op
@@ -1066,6 +1135,30 @@ void Stubs::register_defaults() {
                   fmt_expand_va(e, e.read_reg(Reg::A4), e.read_reg(Reg::A5)));
       });
 
+  // ---- output-only printf family (emit to stderr) ----
+  add("printf", [](Engine& e) {  // (fmt, ...)
+    const std::string s = fmt_expand(e, e.read_reg(Reg::A0), 1);
+    std::fputs(s.c_str(), stderr);
+    e.write_reg(Reg::Ret0, static_cast<uint64_t>(s.size()));
+  });
+  add("vprintf", [](Engine& e) {  // (fmt, va_list)
+    const std::string s =
+        fmt_expand_va(e, e.read_reg(Reg::A0), e.read_reg(Reg::A1));
+    std::fputs(s.c_str(), stderr);
+    e.write_reg(Reg::Ret0, static_cast<uint64_t>(s.size()));
+  });
+  add("puts", [](Engine& e) {  // (str) -> non-negative
+    const std::string s = e.read_cstr(e.read_reg(Reg::A0));
+    std::fputs(s.c_str(), stderr);
+    std::fputc('\n', stderr);
+    e.write_reg(Reg::Ret0, static_cast<uint64_t>(s.size() + 1));
+  });
+  add("putchar", [](Engine& e) {  // (c) -> c
+    const int c = static_cast<int>(e.read_reg(Reg::A0));
+    std::fputc(c, stderr);
+    e.write_reg(Reg::Ret0, static_cast<uint64_t>(c));
+  });
+
   // ---- directory enumeration: report "directory does not exist" (NULL) ----
   // Returning a fake non-null DIR* is WRONG for /proc/<pid>/task scans (Ducex's
   // anti-Frida thread sweep): a real device returns NULL for a non-existent
@@ -1207,6 +1300,121 @@ void Stubs::register_defaults() {
     if (n) e.write(d, buf.data(), n);
     e.write_reg(Reg::Ret0, d);
   });
+
+  // ---- string utilities ----
+  add("stpcpy", [](Engine& e) {  // (dst, src) -> ptr to terminating NUL in dst
+    const uint64_t dst = e.read_reg(Reg::A0);
+    const std::string s = e.read_cstr(e.read_reg(Reg::A1));
+    e.write(dst, s.data(), s.size());
+    const uint8_t z = 0;
+    e.write(dst + s.size(), &z, 1);
+    e.write_reg(Reg::Ret0, dst + s.size());
+  });
+  add("stpncpy", [](Engine& e) {  // (dst, src, n) -> ptr to NUL or dst+n
+    const uint64_t dst = e.read_reg(Reg::A0), n = e.read_reg(Reg::A2);
+    const std::string src = e.read_cstr(e.read_reg(Reg::A1), n);
+    std::vector<uint8_t> buf(n, 0);
+    for (size_t i = 0; i < src.size() && i < n; ++i)
+      buf[i] = static_cast<uint8_t>(src[i]);
+    if (n) e.write(dst, buf.data(), n);
+    const size_t end = std::min(src.size(), static_cast<size_t>(n));
+    e.write_reg(Reg::Ret0, dst + end);
+  });
+  add("strchrnul", [](Engine& e) {  // (s, c) -> ptr to c, or ptr to NUL
+    const uint64_t s = e.read_reg(Reg::A0);
+    const char c = static_cast<char>(e.read_reg(Reg::A1));
+    const std::string str = e.read_cstr(s);
+    for (size_t i = 0; i <= str.size(); ++i)
+      if (str.c_str()[i] == c || str.c_str()[i] == '\0') {
+        e.write_reg(Reg::Ret0, s + i);
+        return;
+      }
+    e.write_reg(Reg::Ret0, s + str.size());
+  });
+  add("memmem", [](Engine& e) {  // (hay, hlen, needle, nlen) -> ptr or NULL
+    const uint64_t hp = e.read_reg(Reg::A0), hl = e.read_reg(Reg::A1);
+    const uint64_t np = e.read_reg(Reg::A2), nl = e.read_reg(Reg::A3);
+    if (!nl) { e.write_reg(Reg::Ret0, hp); return; }
+    if (hl < nl) { e.write_reg(Reg::Ret0, 0); return; }
+    std::vector<uint8_t> hay(hl), need(nl);
+    e.read(hp, hay.data(), hl);
+    e.read(np, need.data(), nl);
+    for (uint64_t i = 0; i + nl <= hl; ++i)
+      if (std::memcmp(hay.data() + i, need.data(), nl) == 0) {
+        e.write_reg(Reg::Ret0, hp + i);
+        return;
+      }
+    e.write_reg(Reg::Ret0, 0);
+  });
+  add("strerror", [this](Engine& e) {  // (errnum) -> static string ptr
+    static uint64_t errbuf = 0;
+    if (!errbuf) errbuf = mem_.heap_alloc(256);
+    const char* msg = std::strerror(static_cast<int>(e.read_reg(Reg::A0)));
+    if (!msg) msg = "Unknown error";
+    const size_t n = std::min<size_t>(std::strlen(msg), 255);
+    e.write(errbuf, msg, n);
+    const uint8_t z = 0;
+    e.write(errbuf + n, &z, 1);
+    e.write_reg(Reg::Ret0, errbuf);
+  });
+  add("strerror_r", [](Engine& e) {  // (errnum, buf, buflen) -> 0
+    const uint64_t buf = e.read_reg(Reg::A1), buflen = e.read_reg(Reg::A2);
+    const char* msg = std::strerror(static_cast<int>(e.read_reg(Reg::A0)));
+    if (!msg) msg = "Unknown error";
+    if (buflen) {
+      const size_t n = std::min<size_t>(std::strlen(msg), buflen - 1);
+      e.write(buf, msg, n);
+      const uint8_t z = 0;
+      e.write(buf + n, &z, 1);
+    }
+    e.write_reg(Reg::Ret0, 0);
+  });
+  add("strverscmp", [](Engine& e) {  // glibc version-string compare
+    const std::string a = e.read_cstr(e.read_reg(Reg::A0));
+    const std::string b = e.read_cstr(e.read_reg(Reg::A1));
+    // Walk both strings: compare char-by-char but when both hit a digit run,
+    // compare the numeric values.
+    size_t i = 0, j = 0;
+    while (i < a.size() || j < b.size()) {
+      if (i < a.size() && j < b.size() &&
+          std::isdigit(static_cast<unsigned char>(a[i])) &&
+          std::isdigit(static_cast<unsigned char>(b[j]))) {
+        // skip leading zeros to find numeric magnitude
+        size_t ai = i, bi = j;
+        while (ai < a.size() && a[ai] == '0') ++ai;
+        while (bi < b.size() && b[bi] == '0') ++bi;
+        size_t ae = ai, be = bi;
+        while (ae < a.size() && std::isdigit(static_cast<unsigned char>(a[ae]))) ++ae;
+        while (be < b.size() && std::isdigit(static_cast<unsigned char>(b[be]))) ++be;
+        const size_t alen = ae - ai, blen = be - bi;
+        if (alen != blen) {
+          e.write_reg(Reg::Ret0, alen < blen
+                                     ? static_cast<uint64_t>(-1LL)
+                                     : static_cast<uint64_t>(1LL));
+          return;
+        }
+        const int cmp = a.substr(ai, alen).compare(b.substr(bi, blen));
+        if (cmp) {
+          e.write_reg(Reg::Ret0, static_cast<uint64_t>(static_cast<int64_t>(cmp)));
+          return;
+        }
+        // equal numeric parts — advance past the full digit runs
+        while (i < a.size() && std::isdigit(static_cast<unsigned char>(a[i]))) ++i;
+        while (j < b.size() && std::isdigit(static_cast<unsigned char>(b[j]))) ++j;
+      } else {
+        const unsigned char ca = i < a.size() ? static_cast<unsigned char>(a[i++]) : 0;
+        const unsigned char cb = j < b.size() ? static_cast<unsigned char>(b[j++]) : 0;
+        if (ca != cb) {
+          e.write_reg(Reg::Ret0, ca < cb
+                                     ? static_cast<uint64_t>(-1LL)
+                                     : static_cast<uint64_t>(1LL));
+          return;
+        }
+      }
+    }
+    e.write_reg(Reg::Ret0, 0);
+  });
+
   auto errno_fn = [this](Engine& e) {  // __errno / __errno_location
     if (!errno_slot_) {
       errno_slot_ = mem_.heap_alloc(8);
@@ -1217,6 +1425,245 @@ void Stubs::register_defaults() {
   };
   add("__errno", errno_fn);
   add("__errno_location", errno_fn);
+
+  // ---- wchar / multibyte (bionic: wchar_t is 4-byte UTF-32 LE) ----
+  // Helpers: read/write NUL-terminated wchar_t[] (4-byte code units) from guest.
+  auto read_wcs = [](Engine& e, uint64_t p) -> std::vector<uint32_t> {
+    std::vector<uint32_t> v;
+    for (;;) {
+      const uint32_t c = e.read_t<uint32_t>(p);
+      v.push_back(c);
+      if (!c) break;
+      p += 4;
+    }
+    return v;
+  };
+  auto write_wcs = [](Engine& e, uint64_t dst, const std::vector<uint32_t>& v) {
+    e.write(dst, v.data(), v.size() * 4);
+  };
+  add("wcslen", [read_wcs](Engine& e) {  // (s) -> number of wchar_t (excl NUL)
+    const auto v = read_wcs(e, e.read_reg(Reg::A0));
+    e.write_reg(Reg::Ret0, v.size() - 1);  // v always ends with NUL
+  });
+  add("wcscpy", [read_wcs, write_wcs](Engine& e) {  // (dst, src) -> dst
+    const uint64_t dst = e.read_reg(Reg::A0);
+    write_wcs(e, dst, read_wcs(e, e.read_reg(Reg::A1)));
+    e.write_reg(Reg::Ret0, dst);
+  });
+  add("wcsncpy", [read_wcs, write_wcs](Engine& e) {  // (dst, src, n) -> dst
+    const uint64_t dst = e.read_reg(Reg::A0), n = e.read_reg(Reg::A2);
+    auto src = read_wcs(e, e.read_reg(Reg::A1));
+    src.resize(n, 0);  // NUL-pad to n if shorter; truncate if longer
+    src[n - 1] = 0;    // but bionic wcsncpy doesn't guarantee NUL — keep for safety
+    e.write(dst, src.data(), n * 4);
+    e.write_reg(Reg::Ret0, dst);
+  });
+  add("wcscat", [read_wcs, write_wcs](Engine& e) {  // (dst, src) -> dst
+    const uint64_t dst = e.read_reg(Reg::A0);
+    auto d = read_wcs(e, dst);
+    d.pop_back();  // remove trailing NUL
+    const auto s = read_wcs(e, e.read_reg(Reg::A1));
+    d.insert(d.end(), s.begin(), s.end());
+    write_wcs(e, dst, d);
+    e.write_reg(Reg::Ret0, dst);
+  });
+  add("wcscmp", [read_wcs](Engine& e) {  // (a, b) -> <0/0/>0
+    const auto a = read_wcs(e, e.read_reg(Reg::A0));
+    const auto b = read_wcs(e, e.read_reg(Reg::A1));
+    for (size_t i = 0; i < a.size() && i < b.size(); ++i) {
+      if (a[i] < b[i]) { e.write_reg(Reg::Ret0, static_cast<uint64_t>(-1LL)); return; }
+      if (a[i] > b[i]) { e.write_reg(Reg::Ret0, 1); return; }
+      if (!a[i]) break;
+    }
+    e.write_reg(Reg::Ret0, 0);
+  });
+  add("wcsncmp", [read_wcs](Engine& e) {  // (a, b, n) -> <0/0/>0
+    const uint64_t n = e.read_reg(Reg::A2);
+    const auto a = read_wcs(e, e.read_reg(Reg::A0));
+    const auto b = read_wcs(e, e.read_reg(Reg::A1));
+    for (uint64_t i = 0; i < n && i < a.size() && i < b.size(); ++i) {
+      if (a[i] < b[i]) { e.write_reg(Reg::Ret0, static_cast<uint64_t>(-1LL)); return; }
+      if (a[i] > b[i]) { e.write_reg(Reg::Ret0, 1); return; }
+      if (!a[i]) break;
+    }
+    e.write_reg(Reg::Ret0, 0);
+  });
+  add("wcschr", [read_wcs](Engine& e) {  // (s, c) -> ptr or NULL
+    const uint64_t sp = e.read_reg(Reg::A0);
+    const uint32_t c = static_cast<uint32_t>(e.read_reg(Reg::A1));
+    const auto v = read_wcs(e, sp);
+    for (size_t i = 0; i < v.size(); ++i)
+      if (v[i] == c) { e.write_reg(Reg::Ret0, sp + i * 4); return; }
+    e.write_reg(Reg::Ret0, 0);
+  });
+  add("wcsstr", [read_wcs](Engine& e) {  // (hay, needle) -> ptr or NULL
+    const uint64_t hp = e.read_reg(Reg::A0);
+    const auto hay = read_wcs(e, hp);
+    const auto nee = read_wcs(e, e.read_reg(Reg::A1));
+    const size_t nl = nee.size() - 1;  // excl NUL
+    if (!nl) { e.write_reg(Reg::Ret0, hp); return; }
+    for (size_t i = 0; i + nl < hay.size(); ++i)
+      if (std::equal(nee.begin(), nee.begin() + nl, hay.begin() + i)) {
+        e.write_reg(Reg::Ret0, hp + i * 4);
+        return;
+      }
+    e.write_reg(Reg::Ret0, 0);
+  });
+  // mbstowcs / wcstombs: bionic uses UTF-8 <-> UTF-32 but packers only pass
+  // ASCII; convert via the trivial 1:1 mapping (ASCII is valid in both).
+  add("mbstowcs", [this](Engine& e) {  // (dst, src, n) -> #wchars written or -1
+    const uint64_t dst = e.read_reg(Reg::A0), n = e.read_reg(Reg::A2);
+    const std::string src = e.read_cstr(e.read_reg(Reg::A1));
+    if (!dst) { e.write_reg(Reg::Ret0, src.size()); return; }
+    const size_t cnt = std::min<size_t>(src.size(), n > 0 ? n - 1 : 0);
+    for (size_t i = 0; i < cnt; ++i) {
+      const uint32_t c = static_cast<unsigned char>(src[i]);
+      e.write_t<uint32_t>(dst + i * 4, c);
+    }
+    e.write_t<uint32_t>(dst + cnt * 4, 0);
+    e.write_reg(Reg::Ret0, cnt);
+  });
+  add("wcstombs", [](Engine& e) {  // (dst, src, n) -> #bytes written
+    const uint64_t dst = e.read_reg(Reg::A0), n = e.read_reg(Reg::A2);
+    uint64_t sp = e.read_reg(Reg::A1);
+    size_t written = 0;
+    while (written + 1 < n) {
+      const uint32_t c = e.read_t<uint32_t>(sp);
+      if (!c) break;
+      if (dst) {
+        const uint8_t b = c < 0x80 ? static_cast<uint8_t>(c) : '?';
+        e.write(dst + written, &b, 1);
+      }
+      ++written;
+      sp += 4;
+    }
+    if (dst && n) {
+      const uint8_t z = 0;
+      e.write(dst + written, &z, 1);
+    }
+    e.write_reg(Reg::Ret0, written);
+  });
+  add("mbtowc", [](Engine& e) {  // (pwc, s, n) -> bytes consumed (ASCII path)
+    const uint64_t pwc = e.read_reg(Reg::A0), s = e.read_reg(Reg::A1);
+    if (!s) { e.write_reg(Reg::Ret0, 0); return; }
+    const uint8_t c = e.read_t<uint8_t>(s);
+    if (pwc) e.write_t<uint32_t>(pwc, c);
+    e.write_reg(Reg::Ret0, c ? 1ULL : 0ULL);
+  });
+  add("wctomb", [](Engine& e) {  // (s, wc) -> bytes written (ASCII path)
+    const uint64_t s = e.read_reg(Reg::A0);
+    const uint32_t wc = static_cast<uint32_t>(e.read_reg(Reg::A1));
+    if (s) {
+      const uint8_t b = wc < 0x80 ? static_cast<uint8_t>(wc) : '?';
+      e.write(s, &b, 1);
+    }
+    e.write_reg(Reg::Ret0, 1);
+  });
+  add("setlocale", [this](Engine& e) {  // (cat, locale) -> static "C" string
+    static uint64_t locale_buf = 0;
+    if (!locale_buf) {
+      locale_buf = mem_.heap_alloc(4);
+      const char c[] = "C";
+      e.write(locale_buf, c, 2);
+    }
+    e.write_reg(Reg::Ret0, locale_buf);
+  });
+  add("uselocale",  [](Engine& e) { e.write_reg(Reg::Ret0, 0); });
+  add("newlocale",  [](Engine& e) { e.write_reg(Reg::Ret0, 0); });
+  add("freelocale", [](Engine& e) { e.write_reg(Reg::Ret0, 0); });
+
+  // ---- network byte order and inet helpers ----
+  // AArch64 is LE; htons/htonl swap; ntohs/ntohl are the same operation.
+  add("htons", [](Engine& e) {
+    const uint16_t v = static_cast<uint16_t>(e.read_reg(Reg::A0));
+    e.write_reg(Reg::Ret0, static_cast<uint64_t>(__builtin_bswap16(v)));
+  });
+  add("ntohs", [](Engine& e) {
+    const uint16_t v = static_cast<uint16_t>(e.read_reg(Reg::A0));
+    e.write_reg(Reg::Ret0, static_cast<uint64_t>(__builtin_bswap16(v)));
+  });
+  add("htonl", [](Engine& e) {
+    const uint32_t v = static_cast<uint32_t>(e.read_reg(Reg::A0));
+    e.write_reg(Reg::Ret0, static_cast<uint64_t>(__builtin_bswap32(v)));
+  });
+  add("ntohl", [](Engine& e) {
+    const uint32_t v = static_cast<uint32_t>(e.read_reg(Reg::A0));
+    e.write_reg(Reg::Ret0, static_cast<uint64_t>(__builtin_bswap32(v)));
+  });
+  add("htonll", [](Engine& e) {
+    e.write_reg(Reg::Ret0, __builtin_bswap64(e.read_reg(Reg::A0)));
+  });
+  add("ntohll", [](Engine& e) {
+    e.write_reg(Reg::Ret0, __builtin_bswap64(e.read_reg(Reg::A0)));
+  });
+  // inet_addr("a.b.c.d") -> IPv4 in network byte order, or INADDR_NONE
+  add("inet_addr", [](Engine& e) {
+    const std::string s = e.read_cstr(e.read_reg(Reg::A0));
+    unsigned int a = 0, b = 0, c = 0, d = 0;
+    if (std::sscanf(s.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) == 4 &&
+        a < 256 && b < 256 && c < 256 && d < 256) {
+      const uint32_t v = (d << 24) | (c << 16) | (b << 8) | a;  // LE store, network order
+      e.write_reg(Reg::Ret0, v);
+    } else {
+      e.write_reg(Reg::Ret0, 0xFFFFFFFFULL);  // INADDR_NONE
+    }
+  });
+  // inet_ntoa(in_addr) -> static dotted-quad string
+  add("inet_ntoa", [this](Engine& e) {
+    static uint64_t ntoa_buf = 0;
+    if (!ntoa_buf) ntoa_buf = mem_.heap_alloc(16);
+    const uint32_t addr = static_cast<uint32_t>(e.read_reg(Reg::A0));
+    char tmp[16];
+    std::snprintf(tmp, sizeof(tmp), "%u.%u.%u.%u",
+                  addr & 0xFF, (addr >> 8) & 0xFF,
+                  (addr >> 16) & 0xFF, (addr >> 24) & 0xFF);
+    e.write(ntoa_buf, tmp, std::strlen(tmp) + 1);
+    e.write_reg(Reg::Ret0, ntoa_buf);
+  });
+  // inet_pton(AF_INET=2, src, dst) -> 1 on success; AF_INET6 returns 0
+  add("inet_pton", [](Engine& e) {
+    const int af = static_cast<int>(e.read_reg(Reg::A0));
+    const std::string src = e.read_cstr(e.read_reg(Reg::A1));
+    const uint64_t dst = e.read_reg(Reg::A2);
+    if (af == 2) {  // AF_INET
+      unsigned int a = 0, b = 0, c = 0, d = 0;
+      if (std::sscanf(src.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) == 4 &&
+          a < 256 && b < 256 && c < 256 && d < 256) {
+        const uint32_t v = (d << 24) | (c << 16) | (b << 8) | a;
+        if (dst) e.write_t<uint32_t>(dst, v);
+        e.write_reg(Reg::Ret0, 1);
+        return;
+      }
+    }
+    e.write_reg(Reg::Ret0, 0);
+  });
+  // inet_ntop(af, src, dst, size) -> dst or NULL
+  add("inet_ntop", [](Engine& e) {
+    const int af = static_cast<int>(e.read_reg(Reg::A0));
+    const uint64_t src = e.read_reg(Reg::A1), dst = e.read_reg(Reg::A2);
+    const uint64_t size = e.read_reg(Reg::A3);
+    if (af == 2 && src && dst && size >= 16) {  // AF_INET
+      const uint32_t addr = e.read_t<uint32_t>(src);
+      char tmp[16];
+      std::snprintf(tmp, sizeof(tmp), "%u.%u.%u.%u",
+                    addr & 0xFF, (addr >> 8) & 0xFF,
+                    (addr >> 16) & 0xFF, (addr >> 24) & 0xFF);
+      e.write(dst, tmp, std::strlen(tmp) + 1);
+      e.write_reg(Reg::Ret0, dst);
+    } else {
+      e.write_reg(Reg::Ret0, 0);
+    }
+  });
+  // socket/connect/bind/listen/accept/send/recv: packers occasionally probe
+  // network but never block on real I/O; return -1 (ENOTSUP) everywhere.
+  for (const char* n :
+       {"socket", "connect", "bind", "listen", "accept", "accept4",
+        "send", "recv", "sendto", "recvfrom", "sendmsg", "recvmsg",
+        "setsockopt", "getsockopt", "shutdown", "getaddrinfo",
+        "freeaddrinfo", "gethostbyname"})
+    add(n, [](Engine& e) {
+      e.write_reg(Reg::Ret0, static_cast<uint64_t>(-1LL));
+    });
 
   // dynamic-linker / fortified libc helpers used by packers
   // dladdr(addr, Dl_info*): fill { dli_fname, dli_fbase, dli_sname, dli_saddr }
@@ -1431,10 +1878,138 @@ void Stubs::register_defaults() {
     if (c >= 'A' && c <= 'Z') c += 32;
     e.write_reg(Reg::Ret0, (uint64_t)c);
   });
-  add("mkdir", [](Engine& e) { e.write_reg(Reg::Ret0, 0); });   // success
-  add("setenv", [](Engine& e) { e.write_reg(Reg::Ret0, 0); });  // success
-  add("chmod", [](Engine& e) { e.write_reg(Reg::Ret0, 0); });
-  add("chown", [](Engine& e) { e.write_reg(Reg::Ret0, 0); });
+
+  // ---- ctype locale-data tables ----
+  // Bionic uses glibc bit encoding; build once in guest heap on first call.
+  // Table has 384 entries (indices -128..255); the returned pointer-to-pointer
+  // dereferences to element 128 (the base for char 0).
+  add("__ctype_b_loc", [this](Engine& e) {
+    static uint64_t outer = 0;
+    if (!outer) {
+      // layout: [384 × uint16_t table][uint64_t inner_ptr][uint64_t outer_ptr]
+      const uint64_t tbl  = mem_.heap_alloc(384 * 2 + 8 + 8);
+      const uint64_t iptr = tbl + 384 * 2;   // inner: → table[128]
+      outer               = iptr + 8;         // outer: → inner_ptr
+      const uint64_t base = tbl + 128 * 2;   // address of table[0] slot
+      // zero the negative-char half (-128..-1)
+      for (int i = 0; i < 128; ++i) e.write_t<uint16_t>(tbl + i * 2, 0);
+      // fill 0..255 using the bionic/glibc bit encoding
+      for (int c = 0; c < 256; ++c) {
+        uint16_t b = 0;
+        if (std::isupper(c)) b |= 0x0100;
+        if (std::islower(c)) b |= 0x0200;
+        if (std::isalpha(c)) b |= 0x0400;
+        if (std::isdigit(c)) b |= 0x0800;
+        if (std::isxdigit(c)) b |= 0x1000;
+        if (std::isspace(c)) b |= 0x2000;
+        if (std::isprint(c)) b |= 0x4000;
+        if (std::ispunct(c)) b |= 0x8000;
+        if (std::iscntrl(c)) b |= 0x0002;
+        if (std::isblank(c)) b |= 0x0001;
+        e.write_t<uint16_t>(base + c * 2, b);
+      }
+      e.write_t<uint64_t>(iptr, base);
+      e.write_t<uint64_t>(outer, iptr);
+    }
+    e.write_reg(Reg::Ret0, outer);
+  });
+  add("__ctype_tolower_loc", [this](Engine& e) {
+    static uint64_t outer = 0;
+    if (!outer) {
+      const uint64_t tbl  = mem_.heap_alloc(384 * 4 + 8 + 8);
+      const uint64_t iptr = tbl + 384 * 4;
+      outer               = iptr + 8;
+      const uint64_t base = tbl + 128 * 4;
+      for (int i = 0; i < 128; ++i) e.write_t<int32_t>(tbl + i * 4, i - 128);
+      for (int c = 0; c < 256; ++c)
+        e.write_t<int32_t>(base + c * 4, std::tolower(c));
+      e.write_t<uint64_t>(iptr, base);
+      e.write_t<uint64_t>(outer, iptr);
+    }
+    e.write_reg(Reg::Ret0, outer);
+  });
+  add("__ctype_toupper_loc", [this](Engine& e) {
+    static uint64_t outer = 0;
+    if (!outer) {
+      const uint64_t tbl  = mem_.heap_alloc(384 * 4 + 8 + 8);
+      const uint64_t iptr = tbl + 384 * 4;
+      outer               = iptr + 8;
+      const uint64_t base = tbl + 128 * 4;
+      for (int i = 0; i < 128; ++i) e.write_t<int32_t>(tbl + i * 4, i - 128);
+      for (int c = 0; c < 256; ++c)
+        e.write_t<int32_t>(base + c * 4, std::toupper(c));
+      e.write_t<uint64_t>(iptr, base);
+      e.write_t<uint64_t>(outer, iptr);
+    }
+    e.write_reg(Reg::Ret0, outer);
+  });
+  // wide-char ctype: operate on ASCII range; return 0 for non-ASCII code points
+  add("iswspace",  [](Engine& e) { const uint32_t c = (uint32_t)e.read_reg(Reg::A0); e.write_reg(Reg::Ret0, c < 128 && std::isspace(c)  ? 1 : 0); });
+  add("iswdigit",  [](Engine& e) { const uint32_t c = (uint32_t)e.read_reg(Reg::A0); e.write_reg(Reg::Ret0, c < 128 && std::isdigit(c)  ? 1 : 0); });
+  add("iswalpha",  [](Engine& e) { const uint32_t c = (uint32_t)e.read_reg(Reg::A0); e.write_reg(Reg::Ret0, c < 128 && std::isalpha(c)  ? 1 : 0); });
+  add("iswalnum",  [](Engine& e) { const uint32_t c = (uint32_t)e.read_reg(Reg::A0); e.write_reg(Reg::Ret0, c < 128 && std::isalnum(c)  ? 1 : 0); });
+  add("iswupper",  [](Engine& e) { const uint32_t c = (uint32_t)e.read_reg(Reg::A0); e.write_reg(Reg::Ret0, c < 128 && std::isupper(c)  ? 1 : 0); });
+  add("iswlower",  [](Engine& e) { const uint32_t c = (uint32_t)e.read_reg(Reg::A0); e.write_reg(Reg::Ret0, c < 128 && std::islower(c)  ? 1 : 0); });
+  add("iswprint",  [](Engine& e) { const uint32_t c = (uint32_t)e.read_reg(Reg::A0); e.write_reg(Reg::Ret0, c < 128 && std::isprint(c)  ? 1 : 0); });
+  add("iswpunct",  [](Engine& e) { const uint32_t c = (uint32_t)e.read_reg(Reg::A0); e.write_reg(Reg::Ret0, c < 128 && std::ispunct(c)  ? 1 : 0); });
+  add("iswcntrl",  [](Engine& e) { const uint32_t c = (uint32_t)e.read_reg(Reg::A0); e.write_reg(Reg::Ret0, c < 128 && std::iscntrl(c)  ? 1 : 0); });
+  add("iswxdigit", [](Engine& e) { const uint32_t c = (uint32_t)e.read_reg(Reg::A0); e.write_reg(Reg::Ret0, c < 128 && std::isxdigit(c) ? 1 : 0); });
+  add("iswblank",  [](Engine& e) { const uint32_t c = (uint32_t)e.read_reg(Reg::A0); e.write_reg(Reg::Ret0, c < 128 && std::isblank(c)  ? 1 : 0); });
+  add("towlower",  [](Engine& e) { const uint32_t c = (uint32_t)e.read_reg(Reg::A0); e.write_reg(Reg::Ret0, c < 128 ? (uint64_t)std::tolower(c) : (uint64_t)c); });
+  add("towupper",  [](Engine& e) { const uint32_t c = (uint32_t)e.read_reg(Reg::A0); e.write_reg(Reg::Ret0, c < 128 ? (uint64_t)std::toupper(c) : (uint64_t)c); });
+  // isXXX for the remaining plain-char set not already registered
+  add("isalnum",  [](Engine& e) { const int c = (int)e.read_reg(Reg::A0); e.write_reg(Reg::Ret0, std::isalnum(c)  ? 1 : 0); });
+  add("ispunct",  [](Engine& e) { const int c = (int)e.read_reg(Reg::A0); e.write_reg(Reg::Ret0, std::ispunct(c)  ? 1 : 0); });
+  add("isprint",  [](Engine& e) { const int c = (int)e.read_reg(Reg::A0); e.write_reg(Reg::Ret0, std::isprint(c)  ? 1 : 0); });
+  add("isupper",  [](Engine& e) { const int c = (int)e.read_reg(Reg::A0); e.write_reg(Reg::Ret0, std::isupper(c)  ? 1 : 0); });
+  add("islower",  [](Engine& e) { const int c = (int)e.read_reg(Reg::A0); e.write_reg(Reg::Ret0, std::islower(c)  ? 1 : 0); });
+  add("iscntrl",  [](Engine& e) { const int c = (int)e.read_reg(Reg::A0); e.write_reg(Reg::Ret0, std::iscntrl(c)  ? 1 : 0); });
+  add("isblank",  [](Engine& e) { const int c = (int)e.read_reg(Reg::A0); e.write_reg(Reg::Ret0, std::isblank(c)  ? 1 : 0); });
+
+  add("mkdir",  [](Engine& e) { e.write_reg(Reg::Ret0, 0); });
+  add("mkdirat",[](Engine& e) { e.write_reg(Reg::Ret0, 0); });
+  add("rmdir",  [](Engine& e) { e.write_reg(Reg::Ret0, 0); });
+  add("setenv", [](Engine& e) { e.write_reg(Reg::Ret0, 0); });
+  add("unsetenv",[](Engine& e){ e.write_reg(Reg::Ret0, 0); });
+  add("chmod",  [](Engine& e) { e.write_reg(Reg::Ret0, 0); });
+  add("fchmod", [](Engine& e) { e.write_reg(Reg::Ret0, 0); });
+  add("chown",  [](Engine& e) { e.write_reg(Reg::Ret0, 0); });
+  add("fchown", [](Engine& e) { e.write_reg(Reg::Ret0, 0); });
+  // unlink / unlinkat: pretend the file was removed successfully
+  add("unlink",   [](Engine& e) { e.write_reg(Reg::Ret0, 0); });
+  add("unlinkat", [](Engine& e) { e.write_reg(Reg::Ret0, 0); });
+  // rename: no VFS rename needed for packer emulation
+  add("rename",   [](Engine& e) { e.write_reg(Reg::Ret0, 0); });
+  add("renameat", [](Engine& e) { e.write_reg(Reg::Ret0, 0); });
+  // truncate / ftruncate: pretend success (VFS read-paths don't need resize)
+  add("truncate",  [](Engine& e) { e.write_reg(Reg::Ret0, 0); });
+  add("truncate64",[](Engine& e) { e.write_reg(Reg::Ret0, 0); });
+  add("ftruncate", [](Engine& e) { e.write_reg(Reg::Ret0, 0); });
+  add("ftruncate64",[](Engine& e){ e.write_reg(Reg::Ret0, 0); });
+  // realpath: copy the input path into the resolved buffer (or heap-alloc if
+  // resolved is NULL), normalising nothing — packers only use this to convert a
+  // relative path to absolute; our VFS already uses absolute paths.
+  add("realpath", [this](Engine& e) {
+    const std::string path = e.read_cstr(e.read_reg(Reg::A0));
+    uint64_t out = e.read_reg(Reg::A1);
+    if (!out) out = mem_.heap_alloc(path.size() + 1);
+    e.write(out, path.c_str(), path.size() + 1);
+    e.write_reg(Reg::Ret0, out);
+  });
+  // mkstemp: registered with VFS access in register_system(); placeholder here
+  // so the symbol resolves even if register_system hasn't run yet.
+  add("mkstemp", [](Engine& e) {
+    e.write_reg(Reg::Ret0, static_cast<uint64_t>(-1LL));
+  });
+  // dup / dup2: VFS fds are opaque ints; we can't truly duplicate them, but
+  // returning the same fd is safe for the read-only use patterns we care about.
+  add("dup",  [](Engine& e) { e.write_reg(Reg::Ret0, e.read_reg(Reg::A0)); });
+  add("dup2", [](Engine& e) { e.write_reg(Reg::Ret0, e.read_reg(Reg::A1)); });
+  add("dup3", [](Engine& e) { e.write_reg(Reg::Ret0, e.read_reg(Reg::A1)); });
+  // pipe / pipe2: packers use these to check if /proc/<pid> is readable;
+  // return -1 (ENOSYS) so the probe cleanly fails.
+  add("pipe",  [](Engine& e) { e.write_reg(Reg::Ret0, static_cast<uint64_t>(-1LL)); });
+  add("pipe2", [](Engine& e) { e.write_reg(Reg::Ret0, static_cast<uint64_t>(-1LL)); });
   // Jiagu shell-state hook (unresolved import in the VM bytecode). Default 0
   // may read as "failed" and trip a bail; VARDOGER_SHELLSTATE overrides the return
   // for probing.
@@ -1654,6 +2229,32 @@ void Stubs::register_defaults() {
     }
     e.write_reg(Reg::Ret0, (uint64_t)(int64_t)matched);
   });
+
+  // ---- asprintf / vasprintf: format into a heap-allocated guest buffer ----
+  add("asprintf", [this](Engine& e) {  // (char** strp, fmt, ...) -> len or -1
+    const uint64_t strp = e.read_reg(Reg::A0);
+    const std::string s = fmt_expand(e, e.read_reg(Reg::A1), 2);
+    const uint64_t buf = mem_.heap_alloc(s.size() + 1);
+    e.write(buf, s.c_str(), s.size() + 1);
+    if (strp) e.write_t<uint64_t>(strp, buf);
+    e.write_reg(Reg::Ret0, static_cast<uint64_t>(s.size()));
+  });
+  add("vasprintf", [this](Engine& e) {  // (char** strp, fmt, va_list) -> len or -1
+    const uint64_t strp = e.read_reg(Reg::A0);
+    const std::string s =
+        fmt_expand_va(e, e.read_reg(Reg::A1), e.read_reg(Reg::A2));
+    const uint64_t buf = mem_.heap_alloc(s.size() + 1);
+    e.write(buf, s.c_str(), s.size() + 1);
+    if (strp) e.write_t<uint64_t>(strp, buf);
+    e.write_reg(Reg::Ret0, static_cast<uint64_t>(s.size()));
+  });
+  // scanf / fscanf: no stdin/fd input in the emulation; return 0 (no items read)
+  for (const char* n : {"scanf", "vscanf", "fscanf", "vfscanf", "vsscanf"})
+    add(n, [](Engine& e) { e.write_reg(Reg::Ret0, 0); });
+  // dprintf / vdprintf: registered with VFS access in register_system()
+  add("dprintf",  [](Engine& e) { e.write_reg(Reg::Ret0, 0); });
+  add("vdprintf", [](Engine& e) { e.write_reg(Reg::Ret0, 0); });
+
   add("__strncpy_chk2", [](Engine& e) {  // (dst, src, n, dstlen, srclen)
     const uint64_t dst = e.read_reg(Reg::A0), src = e.read_reg(Reg::A1),
                    n = e.read_reg(Reg::A2);
@@ -1669,10 +2270,155 @@ void Stubs::register_defaults() {
 
   register_zlib();  // inflate/inflateInit*/inflateEnd backed by host zlib
 
+  // ---- libm: forward to host, extracting double args from guest fp registers.
+  // AArch64 ABI: floats/doubles in D0..D7; return in D0. All variants (float
+  // suffix 'f', long-double suffix 'l') are aliased to the double path since
+  // packer math is never precision-sensitive.
+  auto read_dn = [](Engine& e, int n) -> double {
+    const uint64_t bits = e.read_uc_reg(UC_ARM64_REG_D0 + n);
+    double v; std::memcpy(&v, &bits, 8); return v;
+  };
+  auto write_d0 = [](Engine& e, double v) {
+    uint64_t bits; std::memcpy(&bits, &v, 8);
+    e.write_uc_reg(UC_ARM64_REG_D0, bits);
+  };
+  // unary double -> double
+  for (auto [n, fn] : std::initializer_list<std::pair<const char*, double(*)(double)>>{
+      {"floor",  std::floor},  {"floorf",  std::floor},
+      {"ceil",   std::ceil},   {"ceilf",   std::ceil},
+      {"round",  std::round},  {"roundf",  std::round},
+      {"trunc",  std::trunc},  {"truncf",  std::trunc},
+      {"fabs",   std::fabs},   {"fabsf",   std::fabs},
+      {"sqrt",   std::sqrt},   {"sqrtf",   std::sqrt},
+      {"cbrt",   std::cbrt},   {"cbrtf",   std::cbrt},
+      {"exp",    std::exp},    {"expf",    std::exp},
+      {"exp2",   std::exp2},   {"exp2f",   std::exp2},
+      {"log",    std::log},    {"logf",    std::log},
+      {"log2",   std::log2},   {"log2f",   std::log2},
+      {"log10",  std::log10},  {"log10f",  std::log10},
+      {"sin",    std::sin},    {"sinf",    std::sin},
+      {"cos",    std::cos},    {"cosf",    std::cos},
+      {"tan",    std::tan},    {"tanf",    std::tan},
+      {"asin",   std::asin},   {"asinf",   std::asin},
+      {"acos",   std::acos},   {"acosf",   std::acos},
+      {"atan",   std::atan},   {"atanf",   std::atan},
+      {"sinh",   std::sinh},   {"sinhf",   std::sinh},
+      {"cosh",   std::cosh},   {"coshf",   std::cosh},
+      {"tanh",   std::tanh},   {"tanhf",   std::tanh},
+  }) add(n, [read_dn, write_d0, fn](Engine& e) { write_d0(e, fn(read_dn(e, 0))); });
+  // binary double, double -> double
+  for (auto [n, fn] : std::initializer_list<std::pair<const char*, double(*)(double,double)>>{
+      {"pow",       std::pow},       {"powf",       std::pow},
+      {"fmod",      std::fmod},      {"fmodf",      std::fmod},
+      {"atan2",     std::atan2},     {"atan2f",     std::atan2},
+      {"hypot",     std::hypot},     {"hypotf",     std::hypot},
+      {"fmin",      std::fmin},      {"fminf",      std::fmin},
+      {"fmax",      std::fmax},      {"fmaxf",      std::fmax},
+      {"copysign",  std::copysign},  {"copysignf",  std::copysign},
+      {"remainder", std::remainder}, {"remainderf", std::remainder},
+  }) add(n, [read_dn, write_d0, fn](Engine& e) {
+    write_d0(e, fn(read_dn(e, 0), read_dn(e, 1)));
+  });
+  // integer: abs/labs/llabs — integer registers
+  for (const char* n : {"abs", "labs", "llabs", "__abs"})
+    add(n, [](Engine& e) {
+      const int64_t v = static_cast<int64_t>(e.read_reg(Reg::A0));
+      e.write_reg(Reg::Ret0, static_cast<uint64_t>(v < 0 ? -v : v));
+    });
+  // double -> integer conversions
+  add("lround",  [read_dn](Engine& e) {
+    e.write_reg(Reg::Ret0, static_cast<uint64_t>(std::llround(read_dn(e, 0))));
+  });
+  add("lroundf", [read_dn](Engine& e) {
+    e.write_reg(Reg::Ret0, static_cast<uint64_t>(std::llround(read_dn(e, 0))));
+  });
+  add("llround",  [read_dn](Engine& e) {
+    e.write_reg(Reg::Ret0, static_cast<uint64_t>(std::llround(read_dn(e, 0))));
+  });
+  add("llroundf", [read_dn](Engine& e) {
+    e.write_reg(Reg::Ret0, static_cast<uint64_t>(std::llround(read_dn(e, 0))));
+  });
+  // modf: splits into integral + fractional parts
+  add("modf", [read_dn, write_d0](Engine& e) {
+    double intpart;
+    const double frac = std::modf(read_dn(e, 0), &intpart);
+    const uint64_t out = e.read_reg(Reg::A1);
+    if (out) e.write_t<double>(out, intpart);
+    write_d0(e, frac);
+  });
+  add("modff", [read_dn, write_d0](Engine& e) {
+    double intpart;
+    const double frac = std::modf(read_dn(e, 0), &intpart);
+    const uint64_t out = e.read_reg(Reg::A1);
+    if (out) e.write_t<float>(out, static_cast<float>(intpart));
+    write_d0(e, frac);
+  });
+  // frexp / ldexp / scalbn
+  add("frexp", [read_dn, write_d0](Engine& e) {
+    int exp = 0;
+    const double m = std::frexp(read_dn(e, 0), &exp);
+    const uint64_t out = e.read_reg(Reg::A1);
+    if (out) e.write_t<int32_t>(out, exp);
+    write_d0(e, m);
+  });
+  add("ldexp", [read_dn, write_d0](Engine& e) {
+    write_d0(e, std::ldexp(read_dn(e, 0), static_cast<int>(e.read_reg(Reg::A1))));
+  });
+  add("scalbn", [read_dn, write_d0](Engine& e) {
+    write_d0(e, std::scalbn(read_dn(e, 0), static_cast<int>(e.read_reg(Reg::A1))));
+  });
+  add("isinf", [read_dn](Engine& e) {
+    e.write_reg(Reg::Ret0, std::isinf(read_dn(e, 0)) ? 1ULL : 0ULL);
+  });
+  add("isnan", [read_dn](Engine& e) {
+    e.write_reg(Reg::Ret0, std::isnan(read_dn(e, 0)) ? 1ULL : 0ULL);
+  });
+  add("isfinite", [read_dn](Engine& e) {
+    e.write_reg(Reg::Ret0, std::isfinite(read_dn(e, 0)) ? 1ULL : 0ULL);
+  });
+
   // ---- pthreads: routed through the cooperative Scheduler when one is active
   // (real worker contexts that interleave at yield points), else benign
   // fallbacks.
   register_pthreads();
+
+  // ---- semaphores: host-side count table keyed by guest sem_t* address ----
+  // Packers use semaphores as initialization guards, not for real blocking;
+  // sem_wait never needs to suspend — decrement if >0, succeed either way.
+  static std::unordered_map<uint64_t, int> g_sems;
+  add("sem_init", [](Engine& e) {  // (sem*, pshared, value)
+    g_sems[e.read_reg(Reg::A0)] = static_cast<int>(e.read_reg(Reg::A2));
+    e.write_reg(Reg::Ret0, 0);
+  });
+  add("sem_post", [](Engine& e) {  // (sem*) -> 0
+    g_sems[e.read_reg(Reg::A0)]++;
+    e.write_reg(Reg::Ret0, 0);
+  });
+  add("sem_wait", [](Engine& e) {  // (sem*) -> 0
+    auto& c = g_sems[e.read_reg(Reg::A0)];
+    if (c > 0) c--;
+    e.write_reg(Reg::Ret0, 0);
+  });
+  add("sem_timedwait", [](Engine& e) {  // (sem*, timeout) -> 0
+    auto& c = g_sems[e.read_reg(Reg::A0)];
+    if (c > 0) c--;
+    e.write_reg(Reg::Ret0, 0);
+  });
+  add("sem_trywait", [](Engine& e) {  // (sem*) -> 0 or EAGAIN
+    auto& c = g_sems[e.read_reg(Reg::A0)];
+    if (c > 0) { c--; e.write_reg(Reg::Ret0, 0); }
+    else e.write_reg(Reg::Ret0, static_cast<uint64_t>(-11));  // -EAGAIN
+  });
+  add("sem_destroy", [](Engine& e) {  // (sem*) -> 0
+    g_sems.erase(e.read_reg(Reg::A0));
+    e.write_reg(Reg::Ret0, 0);
+  });
+  add("sem_getvalue", [](Engine& e) {  // (sem*, sval*) -> 0
+    const int v = g_sems[e.read_reg(Reg::A0)];
+    e.write_t<int32_t>(e.read_reg(Reg::A1), v);
+    e.write_reg(Reg::Ret0, 0);
+  });
+
   // pthread_once(once, init): run init() exactly once via PC redirection (no
   // nesting). init is void(void), so it returns straight to pthread_once's
   // caller, as if pthread_once ran it and returned. (X0 is whatever init left;
@@ -1776,6 +2522,64 @@ void Stubs::register_defaults() {
                    (unsigned long long)t, (unsigned long long)v);
     e.write_reg(Reg::Ret0, v);
   });
+
+  // ---- C++ exception ABI ----
+  // __cxa_throw is declared [[noreturn]]; we stop the emulation (the packer
+  // either threw intentionally as an anti-tamper bail-out, or we hit an
+  // unhandled throw path).  VARDOGER_THROW_NOOP redirects to LR instead so
+  // callers that catch their own exception via __cxa_begin_catch survive.
+  add("__cxa_throw", [](Engine& e) {
+    const bool noop = std::getenv("VARDOGER_THROW_NOOP") != nullptr;
+    std::fprintf(stderr, "[__cxa_throw] exobj=%#llx type=%#llx lr=%#llx - %s\n",
+                 (unsigned long long)e.read_reg(Reg::A0),
+                 (unsigned long long)e.read_reg(Reg::A1),
+                 (unsigned long long)e.read_reg(Reg::Lr),
+                 noop ? "NOOP" : "stopping");
+    if (!noop) e.stop();
+  });
+  add("__cxa_rethrow", [](Engine& e) {
+    const bool noop = std::getenv("VARDOGER_THROW_NOOP") != nullptr;
+    std::fprintf(stderr, "[__cxa_rethrow] lr=%#llx - %s\n",
+                 (unsigned long long)e.read_reg(Reg::Lr),
+                 noop ? "NOOP" : "stopping");
+    if (!noop) e.stop();
+  });
+  add("__cxa_begin_catch", [](Engine& e) {  // (exobj) -> exobj
+    e.write_reg(Reg::Ret0, e.read_reg(Reg::A0));
+  });
+  add("__cxa_end_catch", [](Engine& e) { e.write_reg(Reg::Ret0, 0); });
+  add("__cxa_current_exception_type",
+      [](Engine& e) { e.write_reg(Reg::Ret0, 0); });
+  add("__cxa_allocate_exception", [this](Engine& e) {
+    const uint64_t sz = e.read_reg(Reg::A0);
+    e.write_reg(Reg::Ret0, mem_.heap_alloc(sz ? sz : 8));
+  });
+  add("__cxa_free_exception", [](Engine& e) { e.write_reg(Reg::Ret0, 0); });
+  // Personality and unwinder: should not be called in normal packer flow but
+  // must resolve so the import doesn't abort at load time.
+  add("__gxx_personality_v0", [](Engine& e) { e.write_reg(Reg::Ret0, 0); });
+  add("_Unwind_RaiseException", [](Engine& e) {
+    std::fprintf(stderr, "[_Unwind_RaiseException] lr=%#llx - stopping\n",
+                 (unsigned long long)e.read_reg(Reg::Lr));
+    e.stop();
+  });
+  add("_Unwind_Resume", [](Engine& e) {
+    std::fprintf(stderr, "[_Unwind_Resume] lr=%#llx - stopping\n",
+                 (unsigned long long)e.read_reg(Reg::Lr));
+    e.stop();
+  });
+  for (const char* n :
+       {"_Unwind_DeleteException", "_Unwind_Resume_or_Rethrow",
+        "_Unwind_Backtrace"})
+    add(n, [](Engine& e) { e.write_reg(Reg::Ret0, 0); });
+  add("_Unwind_GetIP", [](Engine& e) {
+    e.write_reg(Reg::Ret0, e.read_reg(Reg::Lr));
+  });
+  for (const char* n :
+       {"_Unwind_SetIP", "_Unwind_SetGR", "_Unwind_GetGR",
+        "_Unwind_GetRegionStart", "_Unwind_GetDataRelBase",
+        "_Unwind_GetTextRelBase", "_Unwind_GetLanguageSpecificData"})
+    add(n, [](Engine& e) { e.write_reg(Reg::Ret0, 0); });
 
   // ---- C++ runtime teardown hooks: safe no-ops (we control teardown) ----
   add("__cxa_finalize", [](Engine& e) { e.write_reg(Reg::Ret0, 0); });
@@ -2100,6 +2904,65 @@ void Stubs::register_system(System& sys) {
     const size_t put = sys.vwrite(fd, b.data(), n);
     e.write_reg(Reg::Ret0, size ? put / size : 0);
   });
+  add("fprintf", [&sys](Engine& e) {  // (fd, fmt, ...)
+    const int fd = static_cast<int>(e.read_reg(Reg::A0));
+    const std::string s = fmt_expand(e, e.read_reg(Reg::A1), 2);
+    if (fd <= 2)
+      std::fputs(s.c_str(), stderr);
+    else
+      sys.vwrite(fd, reinterpret_cast<const uint8_t*>(s.data()), s.size());
+    e.write_reg(Reg::Ret0, static_cast<uint64_t>(s.size()));
+  });
+  add("vfprintf", [&sys](Engine& e) {  // (fd, fmt, va_list)
+    const int fd = static_cast<int>(e.read_reg(Reg::A0));
+    const std::string s =
+        fmt_expand_va(e, e.read_reg(Reg::A1), e.read_reg(Reg::A2));
+    if (fd <= 2)
+      std::fputs(s.c_str(), stderr);
+    else
+      sys.vwrite(fd, reinterpret_cast<const uint8_t*>(s.data()), s.size());
+    e.write_reg(Reg::Ret0, static_cast<uint64_t>(s.size()));
+  });
+  add("fputs", [&sys](Engine& e) {  // (str, fd) -> non-negative
+    const std::string s = e.read_cstr(e.read_reg(Reg::A0));
+    const int fd = static_cast<int>(e.read_reg(Reg::A1));
+    if (fd <= 2) std::fputs(s.c_str(), stderr);
+    else sys.vwrite(fd, reinterpret_cast<const uint8_t*>(s.data()), s.size());
+    e.write_reg(Reg::Ret0, static_cast<uint64_t>(s.size()));
+  });
+  add("fputc", [&sys](Engine& e) {  // (c, fd) -> c
+    const int c = static_cast<int>(e.read_reg(Reg::A0));
+    const int fd = static_cast<int>(e.read_reg(Reg::A1));
+    const uint8_t b = static_cast<uint8_t>(c);
+    if (fd <= 2) std::fputc(c, stderr);
+    else sys.vwrite(fd, &b, 1);
+    e.write_reg(Reg::Ret0, static_cast<uint64_t>(c));
+  });
+  add("putc", [&sys](Engine& e) {  // (c, fd) -> c
+    const int c = static_cast<int>(e.read_reg(Reg::A0));
+    const int fd = static_cast<int>(e.read_reg(Reg::A1));
+    const uint8_t b = static_cast<uint8_t>(c);
+    if (fd <= 2) std::fputc(c, stderr);
+    else sys.vwrite(fd, &b, 1);
+    e.write_reg(Reg::Ret0, static_cast<uint64_t>(c));
+  });
+  for (const char* n : {"fflush", "ferror", "clearerr"})
+    add(n, [](Engine& e) { e.write_reg(Reg::Ret0, 0); });
+  add("dprintf", [&sys](Engine& e) {  // (fd, fmt, ...) — overrides placeholder
+    const int fd = static_cast<int>(e.read_reg(Reg::A0));
+    const std::string s = fmt_expand(e, e.read_reg(Reg::A1), 2);
+    if (fd <= 2) std::fputs(s.c_str(), stderr);
+    else sys.vwrite(fd, reinterpret_cast<const uint8_t*>(s.data()), s.size());
+    e.write_reg(Reg::Ret0, static_cast<uint64_t>(s.size()));
+  });
+  add("vdprintf", [&sys](Engine& e) {  // (fd, fmt, va_list) — overrides placeholder
+    const int fd = static_cast<int>(e.read_reg(Reg::A0));
+    const std::string s =
+        fmt_expand_va(e, e.read_reg(Reg::A1), e.read_reg(Reg::A2));
+    if (fd <= 2) std::fputs(s.c_str(), stderr);
+    else sys.vwrite(fd, reinterpret_cast<const uint8_t*>(s.data()), s.size());
+    e.write_reg(Reg::Ret0, static_cast<uint64_t>(s.size()));
+  });
   add("write", [&sys, this](Engine& e) {  // (fd, buf, count)
     const int fd = static_cast<int>(e.read_reg(Reg::A0));
     const uint64_t buf = e.read_reg(Reg::A1), n = e.read_reg(Reg::A2);
@@ -2154,6 +3017,22 @@ void Stubs::register_system(System& sys) {
   add("pclose", [&sys](Engine& e) {  // (FILE*==fd) -> child exit status (0)
     sys.vclose(static_cast<int>(e.read_reg(Reg::A0)));
     e.write_reg(Reg::Ret0, 0);
+  });
+  add("mkstemp", [&sys](Engine& e) {  // (template) -> fd (overrides placeholder)
+    const uint64_t tmpl = e.read_reg(Reg::A0);
+    std::string path = e.read_cstr(tmpl);
+    static int mkstemp_seq = 0;
+    const std::string suffix = std::to_string(mkstemp_seq++);
+    const size_t xpos = path.rfind('X');
+    if (xpos != std::string::npos) {
+      const size_t xs = path.find_last_not_of('X', xpos);
+      const size_t start = (xs == std::string::npos) ? 0 : xs + 1;
+      path.replace(start, path.size() - start, suffix);
+      e.write(tmpl + start, path.c_str() + start, path.size() - start + 1);
+    }
+    sys.add_file(path, "");
+    const int fd = sys.vopen(path, Vfs::kRdWr | Vfs::kCreat);
+    e.write_reg(Reg::Ret0, static_cast<uint64_t>(fd ? fd : -1LL));
   });
   add("feof", [&sys](Engine& e) {  // nonzero once pos >= size
     const int fd = static_cast<int>(e.read_reg(Reg::A0));
