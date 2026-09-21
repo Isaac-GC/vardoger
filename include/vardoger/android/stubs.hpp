@@ -11,6 +11,7 @@
 #include <functional>
 #include <map>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "vardoger/engine/engine.hpp"
@@ -120,6 +121,40 @@ class Stubs {
   // pthread thread-specific storage (single host thread): key -> value.
   std::map<uint64_t, uint64_t> tls_values_;
   uint64_t next_pthread_key_ = 1;
+  // --- lazily-built, per-VM stub state ---------------------------------------
+  // Everything here caches a GUEST address (or state keyed by one), so it must
+  // live on the Stubs instance rather than in a function-local `static`. A
+  // second VM in the same process gets its own Unicorn address space, and an
+  // address left over from the first one is unmapped there (or, worse, lands on
+  // unrelated memory) — so a cached static makes the second VM read garbage or
+  // fault. See errno_slot_ below for the original of this pattern.
+  uint64_t strtok_save_ = 0;      // strtok() saveptr between calls
+  uint64_t strerror_buf_ = 0;     // strerror() static string
+  uint64_t locale_buf_ = 0;       // setlocale() "C"
+  uint64_t inet_ntoa_buf_ = 0;    // inet_ntoa() dotted quad
+  uint64_t brk_stub_ = 0;         // rtld_db_dlactivity/r_debug_state brk#0 stub
+  uint64_t ctype_b_ = 0;          // __ctype_b_loc table slot
+  uint64_t ctype_tolower_ = 0;    // __ctype_tolower_loc table slot
+  uint64_t ctype_toupper_ = 0;    // __ctype_toupper_loc table slot
+  uint64_t auxv_random_ = 0;      // getauxval(AT_RANDOM) buffer
+  uint64_t lconv_ = 0;            // localeconv() struct lconv
+  std::unordered_map<uint64_t, int> sems_;         // guest sem_t* -> count
+  std::unordered_map<int, uint64_t> aasset_bufs_;  // asset fd -> guest buffer
+  int popen_seq_ = 0;             // unique /dev/__vdg_popen/N paths
+  int mkstemp_seq_ = 0;           // unique mkstemp() names
+  // opendir/readdir/closedir: the guest's DIR* is a token into this table.
+  struct DirEntry {
+    std::string name;
+    uint8_t type;
+  };
+  struct DirState {
+    std::vector<DirEntry> ents;
+    size_t idx;
+    uint64_t buf;
+  };
+  std::map<uint64_t, DirState> dirs_;
+  uint64_t dir_token_ = 0x0D190000ull;
+
   uint64_t errno_slot_ = 0;
   uint64_t tm_buf_ =
       0;  // static struct tm for gmtime()   // guest errno (lazy)

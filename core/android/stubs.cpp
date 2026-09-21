@@ -582,6 +582,9 @@ void Stubs::register_zlib() {
                        ? "  [DEX!]"
                        : "");
     if (const char* dir = std::getenv("VARDOGER_ZLIB_DUMP")) {
+      // Deliberately static, not per-VM: this numbers dump FILES in a host
+      // directory, so a second VM must keep counting rather than restart at 00
+      // and overwrite the first one's dumps. It holds no guest state.
       static int n = 0;
       char path[256];
       std::snprintf(path, sizeof path, "%s/uncompress_%02d.bin", dir, n++);
@@ -926,7 +929,6 @@ void Stubs::register_defaults() {
         e.write_reg(Reg::Ret0, 0);
       });
   // strtok / strtok_r: tokenize a guest string in place (NUL out delimiters).
-  static uint64_t s_strtok_save = 0;
   auto strtok_core = [](Engine& e, uint64_t str, uint64_t delim,
                         uint64_t& save) {
     const std::string d = e.read_cstr(delim);
@@ -963,8 +965,8 @@ void Stubs::register_defaults() {
     }
     e.write_reg(Reg::Ret0, tok);
   };
-  add("strtok", [strtok_core](Engine& e) {
-    strtok_core(e, e.read_reg(Reg::A0), e.read_reg(Reg::A1), s_strtok_save);
+  add("strtok", [this, strtok_core](Engine& e) {
+    strtok_core(e, e.read_reg(Reg::A0), e.read_reg(Reg::A1), strtok_save_);
   });
   add("strtok_r", [strtok_core](Engine& e) {  // (str, delim, saveptr)
     const uint64_t sp = e.read_reg(Reg::A2);
@@ -1347,15 +1349,14 @@ void Stubs::register_defaults() {
     e.write_reg(Reg::Ret0, 0);
   });
   add("strerror", [this](Engine& e) {  // (errnum) -> static string ptr
-    static uint64_t errbuf = 0;
-    if (!errbuf) errbuf = mem_.heap_alloc(256);
+    if (!strerror_buf_) strerror_buf_ = mem_.heap_alloc(256);
     const char* msg = std::strerror(static_cast<int>(e.read_reg(Reg::A0)));
     if (!msg) msg = "Unknown error";
     const size_t n = std::min<size_t>(std::strlen(msg), 255);
-    e.write(errbuf, msg, n);
+    e.write(strerror_buf_, msg, n);
     const uint8_t z = 0;
-    e.write(errbuf + n, &z, 1);
-    e.write_reg(Reg::Ret0, errbuf);
+    e.write(strerror_buf_ + n, &z, 1);
+    e.write_reg(Reg::Ret0, strerror_buf_);
   });
   add("strerror_r", [](Engine& e) {  // (errnum, buf, buflen) -> 0
     const uint64_t buf = e.read_reg(Reg::A1), buflen = e.read_reg(Reg::A2);
@@ -1561,13 +1562,12 @@ void Stubs::register_defaults() {
     e.write_reg(Reg::Ret0, 1);
   });
   add("setlocale", [this](Engine& e) {  // (cat, locale) -> static "C" string
-    static uint64_t locale_buf = 0;
-    if (!locale_buf) {
-      locale_buf = mem_.heap_alloc(4);
+    if (!locale_buf_) {
+      locale_buf_ = mem_.heap_alloc(4);
       const char c[] = "C";
-      e.write(locale_buf, c, 2);
+      e.write(locale_buf_, c, 2);
     }
-    e.write_reg(Reg::Ret0, locale_buf);
+    e.write_reg(Reg::Ret0, locale_buf_);
   });
   add("uselocale",  [](Engine& e) { e.write_reg(Reg::Ret0, 0); });
   add("newlocale",  [](Engine& e) { e.write_reg(Reg::Ret0, 0); });
@@ -1611,15 +1611,14 @@ void Stubs::register_defaults() {
   });
   // inet_ntoa(in_addr) -> static dotted-quad string
   add("inet_ntoa", [this](Engine& e) {
-    static uint64_t ntoa_buf = 0;
-    if (!ntoa_buf) ntoa_buf = mem_.heap_alloc(16);
+    if (!inet_ntoa_buf_) inet_ntoa_buf_ = mem_.heap_alloc(16);
     const uint32_t addr = static_cast<uint32_t>(e.read_reg(Reg::A0));
     char tmp[16];
     std::snprintf(tmp, sizeof(tmp), "%u.%u.%u.%u",
                   addr & 0xFF, (addr >> 8) & 0xFF,
                   (addr >> 16) & 0xFF, (addr >> 24) & 0xFF);
-    e.write(ntoa_buf, tmp, std::strlen(tmp) + 1);
-    e.write_reg(Reg::Ret0, ntoa_buf);
+    e.write(inet_ntoa_buf_, tmp, std::strlen(tmp) + 1);
+    e.write_reg(Reg::Ret0, inet_ntoa_buf_);
   });
   // inet_pton(AF_INET=2, src, dst) -> 1 on success; AF_INET6 returns 0
   add("inet_pton", [](Engine& e) {
@@ -1773,17 +1772,16 @@ void Stubs::register_defaults() {
     // real guest memory whose first word is brk#0.
     if (name.find("rtld_db_dlactivity") != std::string::npos ||
         name.find("r_debug_state") != std::string::npos) {
-      static uint64_t s_brkstub = 0;
-      if (!s_brkstub) {
-        s_brkstub = mem_.mmap_alloc(0x8, UC_PROT_READ | UC_PROT_EXEC,
+      if (!brk_stub_) {
+        brk_stub_ = mem_.mmap_alloc(0x8, UC_PROT_READ | UC_PROT_EXEC,
                                     "rtld_db_dlactivity");
-        engine_.write_t<uint32_t>(s_brkstub, 0xD4200000);      // brk #0
-        engine_.write_t<uint32_t>(s_brkstub + 4, 0xD65F03C0);  // ret
+        engine_.write_t<uint32_t>(brk_stub_, 0xD4200000);      // brk #0
+        engine_.write_t<uint32_t>(brk_stub_ + 4, 0xD65F03C0);  // ret
       }
       if (std::getenv("VARDOGER_DL_LOG"))
         std::fprintf(stderr, "[dlsym] %s -> brk#0 stub %#llx\n", name.c_str(),
-                     (unsigned long long)s_brkstub);
-      e.write_reg(Reg::Ret0, s_brkstub);
+                     (unsigned long long)brk_stub_);
+      e.write_reg(Reg::Ret0, brk_stub_);
       return;
     }
     // Anti-tamper hook-symbol evasion (mirrors dlopen's libsotweak/libdvm
@@ -1889,11 +1887,10 @@ void Stubs::register_defaults() {
     // pointer must point AT a slot holding the table base — ONE level of
     // indirection. Returning a pointer to that slot's own address would make
     // (*p)[c] read the pointer storage instead of the flags.
-    static uint64_t tptr = 0;
-    if (!tptr) {
+    if (!ctype_b_) {
       // layout: [384 × uint16_t table][uint64_t table_ptr]
       const uint64_t tbl  = mem_.heap_alloc(384 * 2 + 8);
-      tptr                = tbl + 384 * 2;   // slot holding → table[128]
+      ctype_b_            = tbl + 384 * 2;   // slot holding → table[128]
       const uint64_t base = tbl + 128 * 2;   // address of table[0] slot
       // zero the negative-char half (-128..-1)
       for (int i = 0; i < 128; ++i) e.write_t<uint16_t>(tbl + i * 2, 0);
@@ -1912,35 +1909,33 @@ void Stubs::register_defaults() {
         if (std::isblank(c)) b |= 0x0001;
         e.write_t<uint16_t>(base + c * 2, b);
       }
-      e.write_t<uint64_t>(tptr, base);
+      e.write_t<uint64_t>(ctype_b_, base);
     }
-    e.write_reg(Reg::Ret0, tptr);
+    e.write_reg(Reg::Ret0, ctype_b_);
   });
   add("__ctype_tolower_loc", [this](Engine& e) {
-    static uint64_t tptr = 0;   // → slot holding the table base (see __ctype_b_loc)
-    if (!tptr) {
+    if (!ctype_tolower_) {
       const uint64_t tbl  = mem_.heap_alloc(384 * 4 + 8);
-      tptr                = tbl + 384 * 4;
+      ctype_tolower_      = tbl + 384 * 4;  // slot holding → table[128]
       const uint64_t base = tbl + 128 * 4;
       for (int i = 0; i < 128; ++i) e.write_t<int32_t>(tbl + i * 4, i - 128);
       for (int c = 0; c < 256; ++c)
         e.write_t<int32_t>(base + c * 4, std::tolower(c));
-      e.write_t<uint64_t>(tptr, base);
+      e.write_t<uint64_t>(ctype_tolower_, base);
     }
-    e.write_reg(Reg::Ret0, tptr);
+    e.write_reg(Reg::Ret0, ctype_tolower_);
   });
   add("__ctype_toupper_loc", [this](Engine& e) {
-    static uint64_t tptr = 0;   // → slot holding the table base (see __ctype_b_loc)
-    if (!tptr) {
+    if (!ctype_toupper_) {
       const uint64_t tbl  = mem_.heap_alloc(384 * 4 + 8);
-      tptr                = tbl + 384 * 4;
+      ctype_toupper_      = tbl + 384 * 4;  // slot holding → table[128]
       const uint64_t base = tbl + 128 * 4;
       for (int i = 0; i < 128; ++i) e.write_t<int32_t>(tbl + i * 4, i - 128);
       for (int c = 0; c < 256; ++c)
         e.write_t<int32_t>(base + c * 4, std::toupper(c));
-      e.write_t<uint64_t>(tptr, base);
+      e.write_t<uint64_t>(ctype_toupper_, base);
     }
-    e.write_reg(Reg::Ret0, tptr);
+    e.write_reg(Reg::Ret0, ctype_toupper_);
   });
   // wide-char ctype: operate on ASCII range; return 0 for non-ASCII code points
   add("iswspace",  [](Engine& e) { const uint32_t c = (uint32_t)e.read_reg(Reg::A0); e.write_reg(Reg::Ret0, c < 128 && std::isspace(c)  ? 1 : 0); });
@@ -2384,36 +2379,35 @@ void Stubs::register_defaults() {
   // ---- semaphores: host-side count table keyed by guest sem_t* address ----
   // Packers use semaphores as initialization guards, not for real blocking;
   // sem_wait never needs to suspend — decrement if >0, succeed either way.
-  static std::unordered_map<uint64_t, int> g_sems;
-  add("sem_init", [](Engine& e) {  // (sem*, pshared, value)
-    g_sems[e.read_reg(Reg::A0)] = static_cast<int>(e.read_reg(Reg::A2));
+  add("sem_init", [this](Engine& e) {  // (sem*, pshared, value)
+    sems_[e.read_reg(Reg::A0)] = static_cast<int>(e.read_reg(Reg::A2));
     e.write_reg(Reg::Ret0, 0);
   });
-  add("sem_post", [](Engine& e) {  // (sem*) -> 0
-    g_sems[e.read_reg(Reg::A0)]++;
+  add("sem_post", [this](Engine& e) {  // (sem*) -> 0
+    sems_[e.read_reg(Reg::A0)]++;
     e.write_reg(Reg::Ret0, 0);
   });
-  add("sem_wait", [](Engine& e) {  // (sem*) -> 0
-    auto& c = g_sems[e.read_reg(Reg::A0)];
+  add("sem_wait", [this](Engine& e) {  // (sem*) -> 0
+    auto& c = sems_[e.read_reg(Reg::A0)];
     if (c > 0) c--;
     e.write_reg(Reg::Ret0, 0);
   });
-  add("sem_timedwait", [](Engine& e) {  // (sem*, timeout) -> 0
-    auto& c = g_sems[e.read_reg(Reg::A0)];
+  add("sem_timedwait", [this](Engine& e) {  // (sem*, timeout) -> 0
+    auto& c = sems_[e.read_reg(Reg::A0)];
     if (c > 0) c--;
     e.write_reg(Reg::Ret0, 0);
   });
-  add("sem_trywait", [](Engine& e) {  // (sem*) -> 0 or EAGAIN
-    auto& c = g_sems[e.read_reg(Reg::A0)];
+  add("sem_trywait", [this](Engine& e) {  // (sem*) -> 0 or EAGAIN
+    auto& c = sems_[e.read_reg(Reg::A0)];
     if (c > 0) { c--; e.write_reg(Reg::Ret0, 0); }
     else e.write_reg(Reg::Ret0, static_cast<uint64_t>(-11));  // -EAGAIN
   });
-  add("sem_destroy", [](Engine& e) {  // (sem*) -> 0
-    g_sems.erase(e.read_reg(Reg::A0));
+  add("sem_destroy", [this](Engine& e) {  // (sem*) -> 0
+    sems_.erase(e.read_reg(Reg::A0));
     e.write_reg(Reg::Ret0, 0);
   });
-  add("sem_getvalue", [](Engine& e) {  // (sem*, sval*) -> 0
-    const int v = g_sems[e.read_reg(Reg::A0)];
+  add("sem_getvalue", [this](Engine& e) {  // (sem*, sval*) -> 0
+    const int v = sems_[e.read_reg(Reg::A0)];
     if (const uint64_t out = e.read_reg(Reg::A1)) e.write_t<int32_t>(out, v);
     e.write_reg(Reg::Ret0, 0);
   });
@@ -2485,7 +2479,6 @@ void Stubs::register_defaults() {
   // dl_iterate_phdr).
   add("getauxval", [this](Engine& e) {
     const uint64_t t = e.read_reg(Reg::A0);
-    static uint64_t aux_random = 0;
     uint64_t v = 0;
     switch (t) {
       case 6:
@@ -2504,13 +2497,14 @@ void Stubs::register_defaults() {
         v = 0;
         break;  // AT_SECURE = not setuid
       case 25:  // AT_RANDOM -> 16 bytes of (deterministic) entropy
-        if (!aux_random) {
-          aux_random =
+        if (!auxv_random_) {
+          auxv_random_ =
               mem_.mmap_alloc(16, UC_PROT_READ | UC_PROT_WRITE, "AT_RANDOM");
           for (int i = 0; i < 16; ++i)
-            engine_.write_t<uint8_t>(aux_random + i, (uint8_t)(0x3B * (i + 1)));
+            engine_.write_t<uint8_t>(auxv_random_ + i,
+                                     (uint8_t)(0x3B * (i + 1)));
         }
-        v = aux_random;
+        v = auxv_random_;
         break;
       default:
         v = 0;
@@ -2624,17 +2618,6 @@ void Stubs::register_system(System& sys) {
   // d_name[256] } (name@19).
   // DT_* d_type values used in struct dirent.
   enum : uint8_t { kDtDir = 4, kDtReg = 8, kDtLnk = 10 };
-  struct DirEntry {
-    std::string name;
-    uint8_t type;
-  };
-  struct DirState {
-    std::vector<DirEntry> ents;
-    size_t idx;
-    uint64_t buf;
-  };
-  static std::map<uint64_t, DirState> g_dirs;
-  static uint64_t g_dir_token = 0x0D190000ull;
   auto dir_entries = [&sys](std::string path) -> std::vector<DirEntry> {
     while (path.size() > 1 && path.back() == '/') path.pop_back();
     // name -> d_type; a directory classification wins over a file one (e.g. a
@@ -2682,15 +2665,15 @@ void Stubs::register_system(System& sys) {
     // existing-but-empty directory (e.g. a fresh .jiagu cache) is enumerable,
     // not ENOENT. Packers that stat/list their cache dir and then populate it
     // need opendir to SUCCEED here.
-    const uint64_t tok = g_dir_token += 0x100;
+    const uint64_t tok = dir_token_ += 0x100;
     const uint64_t buf = mem_.heap_alloc(300);
-    g_dirs[tok] = DirState{std::move(ents), 0, buf};
+    dirs_[tok] = DirState{std::move(ents), 0, buf};
     e.write_reg(Reg::Ret0, tok);
   });
   auto do_readdir = [this](Engine& e) {
     const uint64_t tok = e.read_reg(Reg::A0);
-    auto it = g_dirs.find(tok);
-    if (it == g_dirs.end() || it->second.idx >= it->second.ents.size()) {
+    auto it = dirs_.find(tok);
+    if (it == dirs_.end() || it->second.idx >= it->second.ents.size()) {
       e.write_reg(Reg::Ret0, 0);
       return;
     }
@@ -2709,8 +2692,8 @@ void Stubs::register_system(System& sys) {
   };
   add("readdir", do_readdir);
   add("readdir64", do_readdir);
-  add("closedir", [](Engine& e) {
-    g_dirs.erase(e.read_reg(Reg::A0));
+  add("closedir", [this](Engine& e) {
+    dirs_.erase(e.read_reg(Reg::A0));
     e.write_reg(Reg::Ret0, 0);
   });
 
@@ -3003,10 +2986,9 @@ void Stubs::register_system(System& sys) {
   // read as "can't verify -> tampered" and aborts the unpack (Ducex's dla()
   // does exactly this). Back it with an EMPTY output stream: the probe succeeds
   // and finds no bad signatures, so the check passes clean.
-  add("popen", [&sys](Engine& e) {  // (command, mode) -> FILE*==fd
+  add("popen", [this, &sys](Engine& e) {  // (command, mode) -> FILE*==fd
     const std::string cmd = e.read_cstr(e.read_reg(Reg::A0));
-    static int popen_seq = 0;
-    const std::string p = "/dev/__vdg_popen/" + std::to_string(popen_seq++);
+    const std::string p = "/dev/__vdg_popen/" + std::to_string(popen_seq_++);
     sys.add_file(p, "");  // empty command output (no qemu/su/frida markers)
     const int fd = sys.vopen(p, Vfs::kRdOnly);
     if (std::getenv("VARDOGER_OPEN_LOG"))
@@ -3017,11 +2999,10 @@ void Stubs::register_system(System& sys) {
     sys.vclose(static_cast<int>(e.read_reg(Reg::A0)));
     e.write_reg(Reg::Ret0, 0);
   });
-  add("mkstemp", [&sys](Engine& e) {  // (template) -> fd (overrides placeholder)
+  add("mkstemp", [this, &sys](Engine& e) {  // (template) -> fd (overrides placeholder)
     const uint64_t tmpl = e.read_reg(Reg::A0);
     std::string path = e.read_cstr(tmpl);
-    static int mkstemp_seq = 0;
-    const std::string suffix = std::to_string(mkstemp_seq++);
+    const std::string suffix = std::to_string(mkstemp_seq_++);
     const size_t xpos = path.rfind('X');
     if (xpos != std::string::npos) {
       const size_t xs = path.find_last_not_of('X', xpos);
@@ -3081,8 +3062,7 @@ void Stubs::register_system(System& sys) {
   // number/float formatting reads lconv->decimal_point (offset 0); a NULL
   // return -> guest derefs null and faults.
   add("localeconv", [this](Engine& e) {
-    static uint64_t lc = 0;
-    if (!lc) {
+    if (!lconv_) {
       const uint64_t dot =
           mem_.mmap_alloc(2, UC_PROT_READ | UC_PROT_WRITE, "lconv.dp");
       e.write(dot, ".", 2);
@@ -3090,7 +3070,7 @@ void Stubs::register_system(System& sys) {
           mem_.mmap_alloc(1, UC_PROT_READ | UC_PROT_WRITE, "lconv.empty");
       const char z = 0;
       e.write(empty, &z, 1);
-      lc = mem_.mmap_alloc(0x80, UC_PROT_READ | UC_PROT_WRITE, "lconv");
+      lconv_ = mem_.mmap_alloc(0x80, UC_PROT_READ | UC_PROT_WRITE, "lconv");
       std::vector<uint8_t> buf(0x80,
                                0x7f);  // char fields = CHAR_MAX (unspecified)
       auto setp = [&](int off, uint64_t p) {
@@ -3099,9 +3079,9 @@ void Stubs::register_system(System& sys) {
       setp(0, dot);  // decimal_point = "."
       for (int off = 8; off <= 72; off += 8)
         setp(off, empty);  // the other 8 char* -> ""
-      e.write(lc, buf.data(), buf.size());
+      e.write(lconv_, buf.data(), buf.size());
     }
-    e.write_reg(Reg::Ret0, lc);
+    e.write_reg(Reg::Ret0, lconv_);
   });
   // mmap as a libc IMPORT (distinct from the SVC syscall): packers mmap RWX
   // buffers to decrypt+materialize native code into. Returning 0 (the fallback)
@@ -3358,7 +3338,6 @@ void Stubs::register_system(System& sys) {
   // Buffer cache: materialise full asset content into guest heap on first
   // AAsset_getBuffer call, keyed by VFS fd.  Cleared on AAsset_close so the
   // guest heap slot is not leaked across repeated open/close cycles.
-  static std::unordered_map<int, uint64_t> g_aasset_buf;
   add("AAsset_isAllocated", [&sys](Engine& e) {
     const int fd = static_cast<int>(e.read_reg(Reg::A0));
     e.write_reg(Reg::Ret0, sys.is_open(fd) ? 1u : 0u);
@@ -3366,8 +3345,8 @@ void Stubs::register_system(System& sys) {
   add("AAsset_getBuffer", [this, &sys](Engine& e) {
     const int fd = static_cast<int>(e.read_reg(Reg::A0));
     if (!sys.is_open(fd)) { e.write_reg(Reg::Ret0, 0); return; }
-    auto it = g_aasset_buf.find(fd);
-    if (it != g_aasset_buf.end()) { e.write_reg(Reg::Ret0, it->second); return; }
+    auto it = aasset_bufs_.find(fd);
+    if (it != aasset_bufs_.end()) { e.write_reg(Reg::Ret0, it->second); return; }
     const size_t sz = sys.vsize(fd);
     std::string content;
     sys.vseek(fd, 0);
@@ -3375,13 +3354,13 @@ void Stubs::register_system(System& sys) {
     sys.vseek(fd, 0);
     const uint64_t ptr = mem_.heap_alloc(sz ? sz : 1);
     if (sz) e.write(ptr, content.data(), sz);
-    g_aasset_buf[fd] = ptr;
+    aasset_bufs_[fd] = ptr;
     e.write_reg(Reg::Ret0, ptr);
   });
-  add("AAsset_close", [&sys](Engine& e) {
+  add("AAsset_close", [this, &sys](Engine& e) {
     const int fd = static_cast<int>(e.read_reg(Reg::A0));
     sys.vclose(fd);
-    g_aasset_buf.erase(fd);
+    aasset_bufs_.erase(fd);
     e.write_reg(Reg::Ret0, 0);
   });
   add("__system_property_read", [](Engine& e) { e.write_reg(Reg::Ret0, 0); });
