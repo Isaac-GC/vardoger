@@ -14,14 +14,29 @@ The wheel bundles Unicorn, Capstone, and zlib so no system libraries are needed.
 
 ### Prerequisites
 
+CMake 3.22+, a C++20 compiler (GCC 11+ or Clang), pkg-config, and the development packages
+for Unicorn (2.0+), Capstone (4.0+) and zlib.
+
 === "macOS"
     ```bash
-    brew install cmake ninja unicorn capstone zlib
+    brew install cmake ninja pkg-config unicorn capstone zlib
     ```
 
-=== "Linux (Debian / Ubuntu)"
+=== "Ubuntu 24.04+ / Debian 12+"
     ```bash
-    apt-get install cmake ninja-build libunicorn-dev libcapstone-dev zlib1g-dev
+    apt-get install build-essential cmake ninja-build pkg-config \
+        libunicorn-dev libcapstone-dev zlib1g-dev
+    ```
+
+=== "Ubuntu 22.04"
+    22.04 ships no `libunicorn-dev`. Build Unicorn and Capstone from source into
+    `/usr/local` with the helper script, then point pkg-config at them:
+
+    ```bash
+    apt-get install build-essential cmake ninja-build pkg-config curl \
+        libcapstone-dev zlib1g-dev
+    sudo bash scripts/install_native_deps.sh
+    export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig LD_LIBRARY_PATH=/usr/local/lib
     ```
 
 ### Build

@@ -1452,6 +1452,7 @@ void Stubs::register_defaults() {
   });
   add("wcsncpy", [read_wcs, write_wcs](Engine& e) {  // (dst, src, n) -> dst
     const uint64_t dst = e.read_reg(Reg::A0), n = e.read_reg(Reg::A2);
+    if (!n) { e.write_reg(Reg::Ret0, dst); return; }  // n==0: copy nothing
     auto src = read_wcs(e, e.read_reg(Reg::A1));
     src.resize(n, 0);  // NUL-pad to n if shorter; truncate if longer
     src[n - 1] = 0;    // but bionic wcsncpy doesn't guarantee NUL — keep for safety
@@ -1520,7 +1521,7 @@ void Stubs::register_defaults() {
       const uint32_t c = static_cast<unsigned char>(src[i]);
       e.write_t<uint32_t>(dst + i * 4, c);
     }
-    e.write_t<uint32_t>(dst + cnt * 4, 0);
+    if (n) e.write_t<uint32_t>(dst + cnt * 4, 0);  // no room to terminate when n==0
     e.write_reg(Reg::Ret0, cnt);
   });
   add("wcstombs", [](Engine& e) {  // (dst, src, n) -> #bytes written
@@ -1884,12 +1885,15 @@ void Stubs::register_defaults() {
   // Table has 384 entries (indices -128..255); the returned pointer-to-pointer
   // dereferences to element 128 (the base for char 0).
   add("__ctype_b_loc", [this](Engine& e) {
-    static uint64_t outer = 0;
-    if (!outer) {
-      // layout: [384 × uint16_t table][uint64_t inner_ptr][uint64_t outer_ptr]
-      const uint64_t tbl  = mem_.heap_alloc(384 * 2 + 8 + 8);
-      const uint64_t iptr = tbl + 384 * 2;   // inner: → table[128]
-      outer               = iptr + 8;         // outer: → inner_ptr
+    // Contract: the caller writes (*__ctype_b_loc())[c], so the returned
+    // pointer must point AT a slot holding the table base — ONE level of
+    // indirection. Returning a pointer to that slot's own address would make
+    // (*p)[c] read the pointer storage instead of the flags.
+    static uint64_t tptr = 0;
+    if (!tptr) {
+      // layout: [384 × uint16_t table][uint64_t table_ptr]
+      const uint64_t tbl  = mem_.heap_alloc(384 * 2 + 8);
+      tptr                = tbl + 384 * 2;   // slot holding → table[128]
       const uint64_t base = tbl + 128 * 2;   // address of table[0] slot
       // zero the negative-char half (-128..-1)
       for (int i = 0; i < 128; ++i) e.write_t<uint16_t>(tbl + i * 2, 0);
@@ -1908,40 +1912,35 @@ void Stubs::register_defaults() {
         if (std::isblank(c)) b |= 0x0001;
         e.write_t<uint16_t>(base + c * 2, b);
       }
-      e.write_t<uint64_t>(iptr, base);
-      e.write_t<uint64_t>(outer, iptr);
+      e.write_t<uint64_t>(tptr, base);
     }
-    e.write_reg(Reg::Ret0, outer);
+    e.write_reg(Reg::Ret0, tptr);
   });
   add("__ctype_tolower_loc", [this](Engine& e) {
-    static uint64_t outer = 0;
-    if (!outer) {
-      const uint64_t tbl  = mem_.heap_alloc(384 * 4 + 8 + 8);
-      const uint64_t iptr = tbl + 384 * 4;
-      outer               = iptr + 8;
+    static uint64_t tptr = 0;   // → slot holding the table base (see __ctype_b_loc)
+    if (!tptr) {
+      const uint64_t tbl  = mem_.heap_alloc(384 * 4 + 8);
+      tptr                = tbl + 384 * 4;
       const uint64_t base = tbl + 128 * 4;
       for (int i = 0; i < 128; ++i) e.write_t<int32_t>(tbl + i * 4, i - 128);
       for (int c = 0; c < 256; ++c)
         e.write_t<int32_t>(base + c * 4, std::tolower(c));
-      e.write_t<uint64_t>(iptr, base);
-      e.write_t<uint64_t>(outer, iptr);
+      e.write_t<uint64_t>(tptr, base);
     }
-    e.write_reg(Reg::Ret0, outer);
+    e.write_reg(Reg::Ret0, tptr);
   });
   add("__ctype_toupper_loc", [this](Engine& e) {
-    static uint64_t outer = 0;
-    if (!outer) {
-      const uint64_t tbl  = mem_.heap_alloc(384 * 4 + 8 + 8);
-      const uint64_t iptr = tbl + 384 * 4;
-      outer               = iptr + 8;
+    static uint64_t tptr = 0;   // → slot holding the table base (see __ctype_b_loc)
+    if (!tptr) {
+      const uint64_t tbl  = mem_.heap_alloc(384 * 4 + 8);
+      tptr                = tbl + 384 * 4;
       const uint64_t base = tbl + 128 * 4;
       for (int i = 0; i < 128; ++i) e.write_t<int32_t>(tbl + i * 4, i - 128);
       for (int c = 0; c < 256; ++c)
         e.write_t<int32_t>(base + c * 4, std::toupper(c));
-      e.write_t<uint64_t>(iptr, base);
-      e.write_t<uint64_t>(outer, iptr);
+      e.write_t<uint64_t>(tptr, base);
     }
-    e.write_reg(Reg::Ret0, outer);
+    e.write_reg(Reg::Ret0, tptr);
   });
   // wide-char ctype: operate on ASCII range; return 0 for non-ASCII code points
   add("iswspace",  [](Engine& e) { const uint32_t c = (uint32_t)e.read_reg(Reg::A0); e.write_reg(Reg::Ret0, c < 128 && std::isspace(c)  ? 1 : 0); });
@@ -2415,7 +2414,7 @@ void Stubs::register_defaults() {
   });
   add("sem_getvalue", [](Engine& e) {  // (sem*, sval*) -> 0
     const int v = g_sems[e.read_reg(Reg::A0)];
-    e.write_t<int32_t>(e.read_reg(Reg::A1), v);
+    if (const uint64_t out = e.read_reg(Reg::A1)) e.write_t<int32_t>(out, v);
     e.write_reg(Reg::Ret0, 0);
   });
 
