@@ -3,6 +3,12 @@ site_description: Drive the vardoger faithful-Android ARM64 runtime from Python.
 site_author: Isaac
 docs_dir: docs/reference
 
+# Release this documentation describes. Bump together with the version in
+# CMakeLists.txt (project VERSION) and pyproject.toml.
+extra:
+  version: 0.6.0
+copyright: vardoger 0.6.0 — LGPL-3.0-only
+
 theme:
   name: material
   palette:

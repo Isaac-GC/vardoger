@@ -1,12 +1,21 @@
 # Installation
 
+Current release: **0.6.0**.
+
 ## From PyPI (recommended)
 
 ```bash
-pip install vardoger-vm
+pip install vardoger-vm            # latest
+pip install vardoger-vm==0.6.0     # pin this release
 ```
 
 The wheel bundles Unicorn, Capstone, and zlib so no system libraries are needed.
+
+Check what you have:
+
+```bash
+python -c "import importlib.metadata as m; print(m.version('vardoger-vm'))"
+```
 
 ---
 
