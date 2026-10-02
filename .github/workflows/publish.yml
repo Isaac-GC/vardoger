@@ -22,16 +22,22 @@ jobs:
         include:
           - { os: ubuntu-latest, archs: x86_64 }     # manylinux x86_64
           - { os: ubuntu-24.04-arm, archs: aarch64 } # manylinux aarch64 (native ARM runner)
-          - { os: macos-14, archs: arm64, macos_target: "14.0" }  # Apple Silicon
+          - { os: macos-15, archs: arm64, macos_target: "15.0" }  # Apple Silicon
         #  - { os: macos-13, archs: x86_64, macos_target: "13.0" } # Intel
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
-      # cibuildwheel builds one wheel per Python version inside a manylinux (or macOS) environment.
-      # before-all there installs Unicorn/Capstone/zlib (see pyproject.toml), and auditwheel/delocate
+      # cibuildwheel builds inside a manylinux (or macOS) environment; before-all there
+      # installs Unicorn/Capstone/zlib (see pyproject.toml), and auditwheel/delocate
       # bundle them into the wheel so it needs nothing at install time.
-      - uses: pypa/cibuildwheel@v2.21
+      #
+      # pyproject.toml's wheel.py-api = "py3" makes the wheel's tag interpreter-agnostic
+      # (py3-none-<platform>, good for every Python 3.10+), so `build = "cp312-*"` there
+      # builds it just once per (OS, arch) rather than once per Python version — bumping
+      # that identifier is only needed if cibuildwheel drops support for it. The pin below
+      # is this action's own version floor; bump it to pick up new platform/arch support.
+      - uses: pypa/cibuildwheel@v4.2
         env:
           CIBW_ARCHS: ${{ matrix.archs }}
           # Ignored by the Linux builds; on macOS it sets the wheel's min-target
